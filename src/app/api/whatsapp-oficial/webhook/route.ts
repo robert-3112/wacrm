@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp-oficial/webhook-signature'
 import { supabaseAdmin } from '@/lib/whatsapp-oficial/supabase-admin'
-import { mapMetaStatusToDb, shouldApplyStatusTransition } from '@/lib/whatsapp-oficial/status'
+import { mapMetaStatusToDb } from '@/lib/whatsapp-oficial/status'
 import { isValidLeadPhone, normalizePhoneDigits } from '@/lib/whatsapp-oficial/phone'
 import {
   WHATSAPP_OFICIAL_RATE_LIMITS,
@@ -337,152 +337,52 @@ async function processInboundMessage(
     return
   }
 
-  const { data: lead, error: leadError } = await admin
-    .from('leads')
-    .select('id')
-    .eq('tenant_id', channel.tenant_id)
-    .eq('whatsapp', phone)
-    .maybeSingle()
-
-  if (leadError) {
-    console.error('[whatsapp-oficial/webhook] failed to look up lead by phone:', leadError.message)
-    return
-  }
-
-  if (!lead) {
-    // TODO (Fase 5): once `whatsapp_oficial_criar_lead_inbound` exists,
-    // call it here to create the lead and retry conversation resolution
-    // in the same pass. Until then, the raw event above is durably
-    // recorded (see whatsapp_webhook_events_unprocessed_idx) so a Fase 5
-    // backfill job can find and reprocess every inbound message that
-    // arrived before its lead existed — nothing is lost, just deferred.
-    await markEventProcessed(
-      admin,
-      channel.id,
-      'message',
-      externalId,
-      `lead nao encontrado para o telefone ${phone} — aguardando RPC ` +
-        'whatsapp_oficial_criar_lead_inbound (Fase 5)',
-    )
-    return
-  }
-
-  const conversation = await findOrCreateConversation(admin, channel, lead.id as string)
-  if (!conversation) {
-    await markEventProcessed(
-      admin,
-      channel.id,
-      'message',
-      externalId,
-      'falha ao resolver/criar whatsapp_conversations',
-    )
-    return
-  }
-
   const { messageType, content, mediaUrl, mediaMimeType } = parseMessageContent(message)
 
-  const { error: msgInsertError } = await admin.from('whatsapp_messages').insert({
-    tenant_id: channel.tenant_id,
-    conversation_id: conversation.id,
-    wamid: message.id,
-    direction: 'inbound',
-    message_type: messageType,
-    content,
-    media_url: mediaUrl,
-    media_mime_type: mediaMimeType,
-    status: 'recebida',
-    raw_payload: { message, contact },
-    wpp_timestamp: new Date(Number(message.timestamp) * 1000).toISOString(),
+  // Single entry point into the bridge (Fase 5, applied after this route was
+  // first written — see docs/decisions/ADR-WHATSAPP-OFFICIAL-WACRM.md D5).
+  // Finds-or-creates the lead by (tenant_id, whatsapp), finds-or-creates the
+  // conversation by (tenant_id, canal_id, lead_id), and inserts the message
+  // idempotently by (tenant_id, wamid) — all inside one SECURITY DEFINER
+  // transaction, replacing what used to be four separate client-side
+  // read/write round trips (and the "lead não encontrado" TODO below it).
+  const { data: rpcResult, error: rpcError } = await admin.rpc('whatsapp_oficial_processar_inbound', {
+    p_tenant_id: channel.tenant_id,
+    p_canal_id: channel.id,
+    p_whatsapp: phone,
+    p_wa_contact_name: contact?.profile?.name ?? null,
+    p_wamid: message.id,
+    p_message_type: messageType,
+    p_content: content,
+    p_media_url: mediaUrl,
+    p_media_mime_type: mediaMimeType,
+    p_wpp_timestamp: new Date(Number(message.timestamp) * 1000).toISOString(),
+    p_raw_payload: { message, contact },
   })
 
-  if (msgInsertError) {
-    // Defense-in-depth: whatsapp_webhook_events dedup above should already
-    // have caught a replay, but whatsapp_messages also carries its own
-    // UNIQUE(tenant_id, wamid) — treat a conflict here as the same
-    // "already processed" outcome rather than an error.
-    if (!isUniqueViolation(msgInsertError)) {
-      console.error(
-        '[whatsapp-oficial/webhook] failed to insert whatsapp_messages:',
-        msgInsertError.message,
-      )
-    }
-    await markEventProcessed(
-      admin,
-      channel.id,
-      'message',
-      externalId,
-      isUniqueViolation(msgInsertError) ? 'duplicado (unique wamid)' : msgInsertError.message,
+  if (rpcError) {
+    console.error(
+      '[whatsapp-oficial/webhook] whatsapp_oficial_processar_inbound RPC failed:',
+      rpcError.message,
     )
+    await markEventProcessed(admin, channel.id, 'message', externalId, rpcError.message)
     return
   }
 
-  const preview = content ? content.slice(0, 200) : `[${messageType}]`
-  const { error: convUpdateError } = await admin
-    .from('whatsapp_conversations')
-    .update({
-      ultima_mensagem_em: new Date().toISOString(),
-      ultima_mensagem_preview: preview,
-      nao_lidas_corretor: (conversation.nao_lidas_corretor ?? 0) + 1,
-    })
-    .eq('id', conversation.id)
-  if (convUpdateError) {
-    console.error(
-      '[whatsapp-oficial/webhook] failed to update conversation preview/unread count:',
-      convUpdateError.message,
-    )
+  const result = rpcResult as {
+    ok: boolean
+    reason?: string
+    lead_id?: string
+    conversation_id?: string
+  }
+  if (!result.ok) {
+    // Business-rule rejection (whatsapp_invalido, canal_invalido, lead_nao_ativo)
+    // rather than an infra error — the raw event stays recorded either way.
+    await markEventProcessed(admin, channel.id, 'message', externalId, result.reason ?? 'rejeitado')
+    return
   }
 
   await markEventProcessed(admin, channel.id, 'message', externalId, null)
-}
-
-interface ConversationRow {
-  id: string
-  nao_lidas_corretor: number | null
-}
-
-async function findOrCreateConversation(
-  admin: SupabaseClient,
-  channel: ChannelRow,
-  leadId: string,
-): Promise<ConversationRow | null> {
-  const { data: existing, error: findError } = await admin
-    .from('whatsapp_conversations')
-    .select('id, nao_lidas_corretor')
-    .eq('tenant_id', channel.tenant_id)
-    .eq('canal_id', channel.id)
-    .eq('lead_id', leadId)
-    .maybeSingle()
-
-  if (findError) {
-    console.error('[whatsapp-oficial/webhook] failed to look up conversation:', findError.message)
-    return null
-  }
-  if (existing) return existing as ConversationRow
-
-  const { data: created, error: createError } = await admin
-    .from('whatsapp_conversations')
-    .insert({ tenant_id: channel.tenant_id, canal_id: channel.id, lead_id: leadId })
-    .select('id, nao_lidas_corretor')
-    .single()
-
-  if (createError) {
-    if (isUniqueViolation(createError)) {
-      // Lost a race with a concurrent delivery for the same (canal, lead) —
-      // re-select the row the other request created instead of failing.
-      const { data: raced } = await admin
-        .from('whatsapp_conversations')
-        .select('id, nao_lidas_corretor')
-        .eq('tenant_id', channel.tenant_id)
-        .eq('canal_id', channel.id)
-        .eq('lead_id', leadId)
-        .maybeSingle()
-      return (raced as ConversationRow | null) ?? null
-    }
-    console.error('[whatsapp-oficial/webhook] failed to create conversation:', createError.message)
-    return null
-  }
-
-  return created as ConversationRow
 }
 
 interface ParsedMessageContent {
@@ -644,79 +544,39 @@ async function processStatusEvent(
     return
   }
 
-  const { data: msg, error: msgError } = await admin
-    .from('whatsapp_messages')
-    .select('id, status')
-    .eq('tenant_id', channel.tenant_id)
-    .eq('wamid', status.id)
-    .maybeSingle()
-
-  if (msgError) {
-    console.error(
-      '[whatsapp-oficial/webhook] failed to look up message for status update:',
-      msgError.message,
-    )
-    return
-  }
-  if (!msg) {
-    await markEventProcessed(
-      admin,
-      channel.id,
-      'status',
-      externalId,
-      `whatsapp_messages nao encontrada para wamid ${status.id}`,
-    )
-    return
+  // Single entry point into the bridge (Fase 5). Looks the message up by
+  // (tenant_id, wamid), dedupes the status event by meta_status_id, and
+  // applies the rank-based non-regression rule — including the terminal
+  // `falhou` guard (fixed in migration 20260724150000 after this route was
+  // first wired to a two-step rank-fetch/compare that had the same gap;
+  // see docs/decisions/ADR-WHATSAPP-OFFICIAL-WACRM.md D7 and
+  // src/lib/whatsapp-oficial/status.ts, which now only documents the rule
+  // rather than deciding it). `p_detalhe` carries both the flat code/message
+  // the RPC reads for `falhou` and the full raw Meta status payload for audit.
+  const detalhe: Record<string, unknown> = { status }
+  if (mapped === 'falhou' && status.errors?.[0]) {
+    detalhe.code = String(status.errors[0].code)
+    detalhe.message = status.errors[0].message ?? status.errors[0].title ?? null
   }
 
-  // Fetch both ranks from the single source of truth — public.whatsapp_status_rank
-  // — rather than re-deriving them in TypeScript, per the mission spec.
-  const [currentRankResult, incomingRankResult] = await Promise.all([
-    admin.rpc('whatsapp_status_rank', { p_status: msg.status }),
-    admin.rpc('whatsapp_status_rank', { p_status: mapped }),
-  ])
-  if (currentRankResult.error || incomingRankResult.error) {
-    console.error(
-      '[whatsapp-oficial/webhook] whatsapp_status_rank RPC failed:',
-      currentRankResult.error?.message ?? incomingRankResult.error?.message,
-    )
-    return
-  }
-  const currentRank = Number(currentRankResult.data)
-  const incomingRank = Number(incomingRankResult.data)
-
-  if (shouldApplyStatusTransition(msg.status as string, currentRank, mapped, incomingRank)) {
-    const update: Record<string, unknown> = { status: mapped }
-    if (mapped === 'falhou' && status.errors?.[0]) {
-      update.erro_code = String(status.errors[0].code)
-      update.erro_detalhe = status.errors[0].message ?? status.errors[0].title ?? null
-    }
-    const { error: updateError } = await admin
-      .from('whatsapp_messages')
-      .update(update)
-      .eq('id', msg.id)
-    if (updateError) {
-      console.error(
-        '[whatsapp-oficial/webhook] failed to update whatsapp_messages status:',
-        updateError.message,
-      )
-    }
-  }
-
-  const { error: eventInsertError } = await admin.from('whatsapp_message_events').insert({
-    tenant_id: channel.tenant_id,
-    message_id: msg.id,
-    meta_status_id: `${status.id}:${status.status}`,
-    tipo: status.status,
-    detalhe: { status },
-    ocorrido_em: new Date(Number(status.timestamp) * 1000).toISOString(),
+  const { data: rpcResult, error: rpcError } = await admin.rpc('whatsapp_oficial_registrar_status', {
+    p_tenant_id: channel.tenant_id,
+    p_wamid: status.id,
+    p_novo_status: mapped,
+    p_meta_status_id: `${status.id}:${status.status}`,
+    p_ocorrido_em: new Date(Number(status.timestamp) * 1000).toISOString(),
+    p_detalhe: detalhe,
   })
-  if (eventInsertError && !isUniqueViolation(eventInsertError)) {
+
+  if (rpcError) {
     console.error(
-      '[whatsapp-oficial/webhook] failed to insert whatsapp_message_events:',
-      eventInsertError.message,
+      '[whatsapp-oficial/webhook] whatsapp_oficial_registrar_status RPC failed:',
+      rpcError.message,
     )
+    await markEventProcessed(admin, channel.id, 'status', externalId, rpcError.message)
+    return
   }
 
-  await markEventProcessed(admin, channel.id, 'status', externalId, null)
+  const result = rpcResult as { ok: boolean; reason?: string }
+  await markEventProcessed(admin, channel.id, 'status', externalId, result.ok ? null : (result.reason ?? 'rejeitado'))
 }

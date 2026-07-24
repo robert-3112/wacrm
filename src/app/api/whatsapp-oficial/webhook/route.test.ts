@@ -167,12 +167,167 @@ function makeFakeDb() {
     return b
   }
 
+  const LEAD_PHONE_RE = /^[0-9]{10,15}$/
+
+  // Mirrors public.whatsapp_oficial_processar_inbound (Fase 5,
+  // supabase/migrations/20260724130000_whatsapp_oficial_bridge_rpcs.sql):
+  // find-or-create lead by (tenant_id, whatsapp), find-or-create conversation
+  // by (tenant_id, canal_id, lead_id), insert message idempotently by
+  // (tenant_id, wamid). The route now calls this RPC instead of doing the
+  // four separate reads/writes itself — see route.ts for the wiring.
+  function rpcProcessarInbound(args: Record<string, unknown>) {
+    const tenantId = args.p_tenant_id as string
+    const canalId = args.p_canal_id as string
+    const phone = ((args.p_whatsapp as string) ?? '').trim()
+    if (!LEAD_PHONE_RE.test(phone)) return { ok: false, reason: 'whatsapp_invalido' }
+    if (!state.channels.some((c) => c.id === canalId && c.tenant_id === tenantId)) {
+      return { ok: false, reason: 'canal_invalido' }
+    }
+
+    let lead = state.leads.find((l) => l.tenant_id === tenantId && l.whatsapp === phone)
+    let leadCreated = false
+    if (!lead) {
+      lead = { id: nextId('lead'), tenant_id: tenantId, whatsapp: phone, status_saida: 'ativo' }
+      state.leads.push(lead)
+      leadCreated = true
+    }
+
+    let conversation = state.conversations.find(
+      (c) => c.tenant_id === tenantId && c.canal_id === canalId && c.lead_id === lead!.id,
+    )
+    let conversationCreated = false
+    if (!conversation) {
+      conversation = {
+        id: nextId('conv'),
+        tenant_id: tenantId,
+        canal_id: canalId,
+        lead_id: lead.id,
+        nao_lidas_corretor: 0,
+      }
+      state.conversations.push(conversation)
+      conversationCreated = true
+    }
+
+    let messageId: string | null = null
+    let messageCreated = false
+    const wamid = args.p_wamid as string | null
+    const content = args.p_content as string | null
+    const mediaUrl = args.p_media_url as string | null
+    if (wamid || content || mediaUrl) {
+      const dupe = wamid
+        ? state.messages.find((m) => m.tenant_id === tenantId && m.wamid === wamid)
+        : undefined
+      if (!dupe) {
+        const row = {
+          id: nextId('msg'),
+          tenant_id: tenantId,
+          conversation_id: conversation.id,
+          wamid,
+          direction: 'inbound',
+          message_type: args.p_message_type ?? 'text',
+          content,
+          media_url: mediaUrl,
+          media_mime_type: args.p_media_mime_type ?? null,
+          status: 'recebida',
+          raw_payload: args.p_raw_payload ?? null,
+          wpp_timestamp: args.p_wpp_timestamp ?? null,
+        }
+        state.messages.push(row)
+        messageId = row.id
+        messageCreated = true
+        conversation.nao_lidas_corretor = (conversation.nao_lidas_corretor ?? 0) + 1
+        conversation.ultima_mensagem_preview = content
+          ? String(content).slice(0, 200)
+          : `[${row.message_type}]`
+      } else {
+        messageId = dupe.id as string
+      }
+    }
+
+    return {
+      ok: true,
+      lead_id: lead.id,
+      conversation_id: conversation.id,
+      message_id: messageId,
+      lead_created: leadCreated,
+      conversation_created: conversationCreated,
+      message_created: messageCreated,
+    }
+  }
+
+  // Mirrors public.whatsapp_oficial_registrar_status AFTER the terminal-falhou
+  // fix (supabase/migrations/20260724150000_..._fix_terminal_falhou.sql):
+  // falhou is terminal (nothing overwrites it once set), falhou itself is
+  // only accepted before entregue/lida, otherwise only forward rank moves apply.
+  function rpcRegistrarStatus(args: Record<string, unknown>) {
+    const tenantId = args.p_tenant_id as string
+    const wamid = args.p_wamid as string
+    const novoStatus = args.p_novo_status as string
+    const metaStatusId = args.p_meta_status_id as string | undefined
+
+    const message = state.messages.find((m) => m.tenant_id === tenantId && m.wamid === wamid)
+    if (!message) return { ok: false, reason: 'mensagem_nao_encontrada' }
+
+    if (metaStatusId && state.messageEvents.some((e) => e.meta_status_id === metaStatusId)) {
+      return { ok: true, already_processed: true, message_id: message.id }
+    }
+
+    const tipoMap: Record<string, string> = {
+      enviada: 'sent',
+      entregue: 'delivered',
+      lida: 'read',
+      falhou: 'failed',
+    }
+    state.messageEvents.push({
+      id: nextId('mev'),
+      tenant_id: tenantId,
+      message_id: message.id,
+      meta_status_id: metaStatusId ?? null,
+      tipo: tipoMap[novoStatus] ?? novoStatus,
+      detalhe: args.p_detalhe ?? {},
+      ocorrido_em: args.p_ocorrido_em ?? null,
+    })
+
+    const currentStatus = message.status as string
+    const entregueRank = STATUS_RANK.entregue
+    let shouldAdvance: boolean
+    if (currentStatus === 'falhou') {
+      shouldAdvance = false
+    } else if (novoStatus === 'falhou') {
+      shouldAdvance = (STATUS_RANK[currentStatus] ?? 0) < entregueRank
+    } else {
+      shouldAdvance = (STATUS_RANK[novoStatus] ?? 0) > (STATUS_RANK[currentStatus] ?? 0)
+    }
+
+    if (shouldAdvance) {
+      message.status = novoStatus
+      const detalhe = (args.p_detalhe ?? {}) as Record<string, unknown>
+      if (novoStatus === 'falhou') {
+        if (detalhe.code) message.erro_code = detalhe.code
+        if (detalhe.message) message.erro_detalhe = detalhe.message
+      }
+    }
+
+    return {
+      ok: true,
+      message_id: message.id,
+      status_aplicado: shouldAdvance,
+      status_atual: shouldAdvance ? novoStatus : currentStatus,
+    }
+  }
+
   return {
     state,
     from: (table: string) => builder(table),
     rpc: async (fn: string, args: Record<string, unknown>) => {
       if (fn === 'whatsapp_status_rank') {
         return { data: STATUS_RANK[args.p_status as string] ?? 0, error: null }
+      }
+      if (fn === 'whatsapp_oficial_processar_inbound') {
+        return { data: rpcProcessarInbound(args), error: null }
+      }
+      if (fn === 'whatsapp_oficial_registrar_status') {
+        return { data: rpcRegistrarStatus(args), error: null }
       }
       return { data: null, error: null }
     },
@@ -404,6 +559,29 @@ describe('POST /api/whatsapp-oficial/webhook — status transitions never regres
 
     await postWebhook(metaStatusPayload({ id: 'wamid.FAIL1', status: 'failed', timestamp: '1700000500' }))
     expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('entregue')
+  })
+
+  it('falhou is terminal: a late delivered/read event never reverts it (regression — see migration 20260724150000)', async () => {
+    fakeDb.state.conversations.push({
+      id: 'conv-seed',
+      tenant_id: 'sunt',
+      canal_id: CHANNEL.id,
+      lead_id: LEAD.id,
+      nao_lidas_corretor: 0,
+    })
+    fakeDb.state.messages.push({
+      id: 'msg-seed',
+      tenant_id: 'sunt',
+      conversation_id: 'conv-seed',
+      wamid: 'wamid.TERM1',
+      status: 'falhou',
+    })
+
+    await postWebhook(metaStatusPayload({ id: 'wamid.TERM1', status: 'delivered', timestamp: '1700000600' }))
+    expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('falhou')
+
+    await postWebhook(metaStatusPayload({ id: 'wamid.TERM1', status: 'read', timestamp: '1700000700' }))
+    expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('falhou')
   })
 })
 
