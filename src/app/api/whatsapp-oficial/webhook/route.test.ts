@@ -192,7 +192,7 @@ function makeFakeDb() {
       leadCreated = true
     }
 
-    let conversation = state.conversations.find(
+    let conversation: Row | undefined = state.conversations.find(
       (c) => c.tenant_id === tenantId && c.canal_id === canalId && c.lead_id === lead!.id,
     )
     let conversationCreated = false
@@ -235,7 +235,7 @@ function makeFakeDb() {
         state.messages.push(row)
         messageId = row.id
         messageCreated = true
-        conversation.nao_lidas_corretor = (conversation.nao_lidas_corretor ?? 0) + 1
+        conversation.nao_lidas_corretor = ((conversation.nao_lidas_corretor as number | undefined) ?? 0) + 1
         conversation.ultima_mensagem_preview = content
           ? String(content).slice(0, 200)
           : `[${row.message_type}]`

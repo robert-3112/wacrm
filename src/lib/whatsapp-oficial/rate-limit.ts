@@ -36,4 +36,20 @@ export const WHATSAPP_OFICIAL_RATE_LIMITS = {
    * bounded against a runaway script.
    */
   mediaRelay: { limit: 60, windowMs: 60_000 },
+  /**
+   * Outbound message send (`/api/whatsapp-oficial/messages/send`), keyed by
+   * user id. Fase 6 only enqueues into `whatsapp_outbox` (no real Meta call
+   * yet — see the outbox worker TODO on that route), but the budget is set
+   * as if it did: same 60/min as the WACRM `send` bucket, comfortable for a
+   * human typing replies, bounded against a runaway script.
+   */
+  messageSend: { limit: 60, windowMs: 60_000 },
+  /**
+   * Lower-frequency inbox write actions (internal notes, mark-as-read,
+   * open/close conversation, handoff, opt-out), keyed by user id. These are
+   * click-driven, not typed, so a much lower budget than `messageSend`
+   * still comfortably covers legitimate use while bounding a stuck retry
+   * loop or a compromised session.
+   */
+  inboxWriteAction: { limit: 30, windowMs: 60_000 },
 } as const
