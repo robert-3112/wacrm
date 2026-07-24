@@ -368,16 +368,47 @@ describe('processOutboxBatch — temporary blocks (requeue, not dead-letter)', (
     const job = makeJob()
     const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
     const flags = makeFlags({ mode: 'live', pilotMode: true })
+    const now = new Date('2026-07-24T12:00:00Z')
 
-    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1', now })
 
     expect(result.blocked).toBe(1)
     const outboxUpdate = outboxUpdates(calls)
     expect(outboxUpdate[0].values).toMatchObject({ status: 'pendente' })
     expect(auditInserts(calls)[0].values).toMatchObject({ motivo: 'fora_da_allowlist_piloto' })
 
+    // Requeue MUST carry a backoff. With next_retry_at = now the next tick
+    // re-claims the job, blocks again, and audits again — an unbounded spin.
+    const nextRetry = new Date(String(outboxUpdate[0]?.values?.next_retry_at)).getTime()
+    expect(nextRetry).toBeGreaterThan(now.getTime())
+
     expect(fetchMock).not.toHaveBeenCalled()
     expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('the allowlist does NOT block the shadow pipeline — it records the would-be verdict instead', async () => {
+    // The allowlist protects a real RECIPIENT. In shadow nobody receives
+    // anything, so gating the simulation on it would leave the pipeline
+    // permanently unexercised while pilot mode is on with an empty allowlist
+    // (the default, fail-closed state).
+    vi.mocked(isAllowlisted).mockReturnValue(false)
+    const job = makeJob()
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const flags = makeFlags({ mode: 'shadow', pilotMode: true, allowlist: [] })
+
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+
+    expect(result.simulated).toBe(1)
+    expect(result.blocked).toBe(0)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'simulado' })
+    // and the audit row lets an operator preview the live decision
+    expect(auditInserts(calls)[0].values).toMatchObject({ decisao: 'simulado' })
+    expect(auditInserts(calls)[0]?.values?.detalhe).toMatchObject({ allowlist_ok: false })
+
+    // still no send, no message mutation, no invented wamid
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+    expect(messageUpdates(calls)).toHaveLength(0)
   })
 })
 

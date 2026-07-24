@@ -21,9 +21,12 @@
  *   b) linked message already terminal -> outbox 'enviado', don't resend
  *   c) broadcast kill switch      -> requeue (defense in depth: the claim
  *      RPC already filters this, this is the second barrier)
- *   d) pilot allowlist            -> requeue (a temporary condition, not a
- *      permanent one — the number may be allowlisted later)
- *   e) shadow mode / provider off -> 'simulado', no network, no credential
+ *   d) shadow mode / provider off -> 'simulado', no network, no credential
+ *   e) pilot allowlist (LIVE ONLY) -> requeue (a temporary condition, not a
+ *      permanent one — the number may be allowlisted later). It sits after
+ *      the shadow branch because it protects a real RECIPIENT, and in shadow
+ *      there is no recipient; the shadow audit row records what the live
+ *      allowlist decision would have been.
  *   f) live                       -> load the credential now (ONLY here),
  *      call the adapter, then apply success/failure through the shared
  *      classification + backoff helpers in `./outbox.ts`
@@ -316,7 +319,31 @@ async function handleJob(
     }
   }
 
-  // d) pilot allowlist — temporary, so requeue rather than dead-letter.
+  // d) shadow — no provider call, no credential read, whatsapp_messages untouched.
+  //
+  // Checked BEFORE the pilot allowlist on purpose. The allowlist exists to
+  // stop a real person from RECEIVING a message; in shadow nobody receives
+  // anything, so gating the simulation on it would leave the pipeline
+  // permanently unexercised while pilot mode is on with an empty allowlist
+  // (which is the default, fail-closed state). Instead the audit row records
+  // what the live outcome WOULD have been, so an operator can preview the
+  // allowlist decision without a real send.
+  if (flags.mode !== 'live' || !isSendEnabledFor(job.provider, flags)) {
+    const motivo = flags.mode !== 'live' ? 'modo_shadow' : 'provider_send_desabilitado'
+    await markSimulated(admin, job, now)
+    await registrarAuditoria(admin, {
+      job,
+      flags,
+      workerId,
+      decisao: 'simulado',
+      motivo,
+      detalhe: { tipo: job.tipo, allowlist_ok: isAllowlisted(job.lead_whatsapp, flags) },
+    })
+    return { outcome: { outboxId: job.outbox_id, decision: 'simulado', reason: motivo }, bucket: 'simulated' }
+  }
+
+  // e) pilot allowlist — live only, and temporary, so requeue rather than
+  //    dead-letter: the number may be allowlisted later, or the pilot ends.
   if (!isAllowlisted(job.lead_whatsapp, flags)) {
     await requeue(admin, job, now, ALLOWLIST_REQUEUE_DELAY_S)
     await registrarAuditoria(admin, {
@@ -330,14 +357,6 @@ async function handleJob(
       outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'fora_da_allowlist_piloto' },
       bucket: 'blocked',
     }
-  }
-
-  // e) shadow — no provider call, no credential read, whatsapp_messages untouched.
-  if (flags.mode !== 'live' || !isSendEnabledFor(job.provider, flags)) {
-    const motivo = flags.mode !== 'live' ? 'modo_shadow' : 'provider_send_desabilitado'
-    await markSimulated(admin, job, now)
-    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'simulado', motivo })
-    return { outcome: { outboxId: job.outbox_id, decision: 'simulado', reason: motivo }, bucket: 'simulated' }
   }
 
   // f) live — the ONLY branch that reads a credential or calls a provider.
