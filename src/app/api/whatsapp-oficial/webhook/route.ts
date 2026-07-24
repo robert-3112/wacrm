@@ -52,10 +52,20 @@ interface MetaWebhookMessage {
   text?: { body: string }
   image?: { id: string; mime_type: string; caption?: string }
   video?: { id: string; mime_type: string; caption?: string }
-  document?: { id: string; mime_type: string; filename?: string; caption?: string }
+  document?: {
+    id: string
+    mime_type: string
+    filename?: string
+    caption?: string
+  }
   audio?: { id: string; mime_type: string }
   sticker?: { id: string; mime_type: string }
-  location?: { latitude: number; longitude: number; name?: string; address?: string }
+  location?: {
+    latitude: number
+    longitude: number
+    name?: string
+    address?: string
+  }
   contacts?: unknown
   interactive?: {
     type: string
@@ -136,7 +146,10 @@ export async function GET(request: Request): Promise<Response> {
     return NextResponse.json({ error: 'Verification token mismatch' }, { status: 403 })
   }
 
-  return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } })
+  return new Response(challenge, {
+    status: 200,
+    headers: { 'Content-Type': 'text/plain' },
+  })
 }
 
 function timingSafeStringEqual(a: string, b: string): boolean {
@@ -178,11 +191,10 @@ export async function POST(request: Request): Promise<Response> {
   try {
     await processWebhookBody(body, supabaseAdmin())
   } catch (error) {
-    // Never let a processing bug turn into a Meta retry-storm — the raw
-    // event is already durably recorded (insert-first, before any
-    // downstream write) by the time any of this can throw, so there's
-    // nothing gained by making Meta believe the delivery failed.
-    console.error('[whatsapp-oficial/webhook] unhandled processing error:', error)
+    // The raw event is durable. A 503 asks Meta to redeliver; insert-first
+    // dedup resumes only rows that still have processed_at = null.
+    console.error('[whatsapp-oficial/webhook] processing failed; requesting redelivery:', error)
+    return NextResponse.json({ error: 'Temporary processing failure' }, { status: 503 })
   }
 
   return NextResponse.json({ status: 'received' }, { status: 200 })
@@ -226,27 +238,24 @@ async function processMessagingChange(
     .eq('phone_number_id', phoneNumberId)
 
   if (channelError) {
-    console.error(
-      '[whatsapp-oficial/webhook] failed to look up channel for phone_number_id:',
-      phoneNumberId,
-      channelError.message,
+    throw new Error(
+      `failed to look up channel for phone_number_id ${phoneNumberId}: ${channelError.message}`,
     )
-    return
   }
   if (!channels || channels.length === 0) {
     console.error(
-      '[whatsapp-oficial/webhook] no whatsapp_channels row for phone_number_id — event dropped ' +
+      '[whatsapp-oficial/webhook] no channel configured; requesting retry ' +
         '(cannot log to whatsapp_webhook_events either, canal_id is required):',
       phoneNumberId,
     )
-    return
+    throw new Error(`no channel configured for phone_number_id ${phoneNumberId}`)
   }
   if (channels.length > 1) {
     console.error(
       `[whatsapp-oficial/webhook] ${channels.length} channels matched phone_number_id ` +
-        `${phoneNumberId} — dropping event to avoid ambiguous tenancy.`,
+        `${phoneNumberId}; requesting retry to avoid ambiguous tenancy.`,
     )
-    return
+    throw new Error(`ambiguous channel configuration for phone_number_id ${phoneNumberId}`)
   }
   const channel = channels[0] as ChannelRow
 
@@ -270,13 +279,56 @@ async function markEventProcessed(
 ): Promise<void> {
   const { error } = await admin
     .from('whatsapp_webhook_events')
-    .update({ processed_at: new Date().toISOString(), processing_error: processingError })
+    .update({
+      processed_at: new Date().toISOString(),
+      processing_error: processingError,
+    })
     .eq('canal_id', canalId)
     .eq('event_type', eventType)
     .eq('external_id', externalId)
   if (error) {
-    console.error('[whatsapp-oficial/webhook] failed to mark event processed:', error.message)
+    throw new Error(`failed to mark webhook event processed: ${error.message}`)
   }
+}
+
+async function markEventFailed(
+  admin: SupabaseClient,
+  canalId: string,
+  eventType: string,
+  externalId: string,
+  processingError: string,
+): Promise<void> {
+  const { error } = await admin
+    .from('whatsapp_webhook_events')
+    .update({ processing_error: processingError })
+    .eq('canal_id', canalId)
+    .eq('event_type', eventType)
+    .eq('external_id', externalId)
+  if (error) {
+    console.error('[whatsapp-oficial/webhook] failed to record processing error:', error.message)
+  }
+}
+
+async function shouldResumeExistingEvent(
+  admin: SupabaseClient,
+  canalId: string,
+  eventType: string,
+  externalId: string,
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from('whatsapp_webhook_events')
+    .select('processed_at')
+    .eq('canal_id', canalId)
+    .eq('event_type', eventType)
+    .eq('external_id', externalId)
+    .maybeSingle()
+
+  if (error || !data) {
+    throw new Error(
+      `failed to inspect duplicate webhook event: ${error?.message ?? 'row not found'}`,
+    )
+  }
+  return data.processed_at == null
 }
 
 async function processInboundMessage(
@@ -305,13 +357,11 @@ async function processInboundMessage(
         '[whatsapp-oficial/webhook] duplicate inbound message ignored (idempotent replay):',
         externalId,
       )
-      return
+      if (!(await shouldResumeExistingEvent(admin, channel.id, 'message', externalId))) return
+      console.info('[whatsapp-oficial/webhook] resuming failed inbound event:', externalId)
+    } else {
+      throw new Error(`failed to record inbound webhook event: ${insertEventError.message}`)
     }
-    console.error(
-      '[whatsapp-oficial/webhook] failed to record inbound message webhook event:',
-      insertEventError.message,
-    )
-    return
   }
 
   if (channel.status !== 'ativo') {
@@ -346,27 +396,30 @@ async function processInboundMessage(
   // idempotently by (tenant_id, wamid) — all inside one SECURITY DEFINER
   // transaction, replacing what used to be four separate client-side
   // read/write round trips (and the "lead não encontrado" TODO below it).
-  const { data: rpcResult, error: rpcError } = await admin.rpc('whatsapp_oficial_processar_inbound', {
-    p_tenant_id: channel.tenant_id,
-    p_canal_id: channel.id,
-    p_whatsapp: phone,
-    p_wa_contact_name: contact?.profile?.name ?? null,
-    p_wamid: message.id,
-    p_message_type: messageType,
-    p_content: content,
-    p_media_url: mediaUrl,
-    p_media_mime_type: mediaMimeType,
-    p_wpp_timestamp: new Date(Number(message.timestamp) * 1000).toISOString(),
-    p_raw_payload: { message, contact },
-  })
+  const { data: rpcResult, error: rpcError } = await admin.rpc(
+    'whatsapp_oficial_processar_inbound',
+    {
+      p_tenant_id: channel.tenant_id,
+      p_canal_id: channel.id,
+      p_whatsapp: phone,
+      p_wa_contact_name: contact?.profile?.name ?? null,
+      p_wamid: message.id,
+      p_message_type: messageType,
+      p_content: content,
+      p_media_url: mediaUrl,
+      p_media_mime_type: mediaMimeType,
+      p_wpp_timestamp: new Date(Number(message.timestamp) * 1000).toISOString(),
+      p_raw_payload: { message, contact },
+    },
+  )
 
   if (rpcError) {
     console.error(
       '[whatsapp-oficial/webhook] whatsapp_oficial_processar_inbound RPC failed:',
       rpcError.message,
     )
-    await markEventProcessed(admin, channel.id, 'message', externalId, rpcError.message)
-    return
+    await markEventFailed(admin, channel.id, 'message', externalId, rpcError.message)
+    throw new Error(`whatsapp_oficial_processar_inbound failed: ${rpcError.message}`)
   }
 
   const result = rpcResult as {
@@ -407,7 +460,11 @@ function parseMessageContent(message: MetaWebhookMessage): ParsedMessageContent 
 
   switch (message.type) {
     case 'text':
-      return { ...empty, messageType: 'text', content: message.text?.body ?? null }
+      return {
+        ...empty,
+        messageType: 'text',
+        content: message.text?.body ?? null,
+      }
 
     case 'image':
       if (message.image?.id) {
@@ -477,7 +534,11 @@ function parseMessageContent(message: MetaWebhookMessage): ParsedMessageContent 
 
     case 'interactive': {
       const reply = message.interactive?.button_reply ?? message.interactive?.list_reply
-      return { ...empty, messageType: 'interactive', content: reply?.title ?? reply?.id ?? null }
+      return {
+        ...empty,
+        messageType: 'interactive',
+        content: reply?.title ?? reply?.id ?? null,
+      }
     }
 
     default:
@@ -512,13 +573,11 @@ async function processStatusEvent(
         '[whatsapp-oficial/webhook] duplicate status event ignored (idempotent replay):',
         externalId,
       )
-      return
+      if (!(await shouldResumeExistingEvent(admin, channel.id, 'status', externalId))) return
+      console.info('[whatsapp-oficial/webhook] resuming failed status event:', externalId)
+    } else {
+      throw new Error(`failed to record status webhook event: ${insertEventError.message}`)
     }
-    console.error(
-      '[whatsapp-oficial/webhook] failed to record status webhook event:',
-      insertEventError.message,
-    )
-    return
   }
 
   if (channel.status !== 'ativo') {
@@ -559,24 +618,33 @@ async function processStatusEvent(
     detalhe.message = status.errors[0].message ?? status.errors[0].title ?? null
   }
 
-  const { data: rpcResult, error: rpcError } = await admin.rpc('whatsapp_oficial_registrar_status', {
-    p_tenant_id: channel.tenant_id,
-    p_wamid: status.id,
-    p_novo_status: mapped,
-    p_meta_status_id: `${status.id}:${status.status}`,
-    p_ocorrido_em: new Date(Number(status.timestamp) * 1000).toISOString(),
-    p_detalhe: detalhe,
-  })
+  const { data: rpcResult, error: rpcError } = await admin.rpc(
+    'whatsapp_oficial_registrar_status',
+    {
+      p_tenant_id: channel.tenant_id,
+      p_wamid: status.id,
+      p_novo_status: mapped,
+      p_meta_status_id: `${status.id}:${status.status}`,
+      p_ocorrido_em: new Date(Number(status.timestamp) * 1000).toISOString(),
+      p_detalhe: detalhe,
+    },
+  )
 
   if (rpcError) {
     console.error(
       '[whatsapp-oficial/webhook] whatsapp_oficial_registrar_status RPC failed:',
       rpcError.message,
     )
-    await markEventProcessed(admin, channel.id, 'status', externalId, rpcError.message)
-    return
+    await markEventFailed(admin, channel.id, 'status', externalId, rpcError.message)
+    throw new Error(`whatsapp_oficial_registrar_status failed: ${rpcError.message}`)
   }
 
   const result = rpcResult as { ok: boolean; reason?: string }
-  await markEventProcessed(admin, channel.id, 'status', externalId, result.ok ? null : (result.reason ?? 'rejeitado'))
+  await markEventProcessed(
+    admin,
+    channel.id,
+    'status',
+    externalId,
+    result.ok ? null : (result.reason ?? 'rejeitado'),
+  )
 }

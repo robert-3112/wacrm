@@ -22,7 +22,9 @@
  * runtime argument-swap bug.
  */
 
-const META_API_VERSION = 'v21.0'
+const configuredVersion = process.env.META_GRAPH_API_VERSION?.trim()
+const META_API_VERSION =
+  configuredVersion && /^v\d+\.\d+$/.test(configuredVersion) ? configuredVersion : 'v24.0'
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
 
 export interface MetaSendResult {

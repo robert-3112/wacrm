@@ -11,28 +11,14 @@ import {
 } from '@/lib/whatsapp-oficial/rate-limit'
 
 /**
- * Send a text reply in an official-channel conversation (Fase 6, mission
- * item 3 — "Composer").
+ * Queue a text reply for an official-channel conversation.
  *
- * WRITTEN FROM SCRATCH for this mission (no WACRM route to adapt — that
- * project's `send-message.ts` calls the Meta Graph API directly, which is
- * explicitly OUT OF SCOPE here). Authorization is `requireConversationAccess`
- * (see that module's doc comment): only the corretor who owns the
- * conversation's lead, or gestão, gets past the RLS-backed check.
+ * Authorization is checked twice:
+ * 1. `requireConversationAccess` proves the user can see the conversation via RLS.
+ * 2. `whatsapp_oficial_enfileirar_mensagem` revalidates actor/tenant/owner in Postgres.
  *
- * TODO (future phase, explicitly out of scope here — see
- * docs/runbooks/WHATSAPP-OFFICIAL-OPERACAO.md and the mission brief):
- *   - This route ONLY inserts the message (`status='pendente'`) and enqueues
- *     it into `whatsapp_outbox` (`status='pendente'`). No call to the Meta
- *     Graph API happens here or anywhere in Fase 6 — PROHIBITED by the
- *     mission's security rules. A future outbox worker (mirroring the
- *     pattern already shipped for the CRM's calendar worker) has to drain
- *     `whatsapp_outbox`, call `sendTextMessage` (`lib/whatsapp-oficial/meta-api.ts`,
- *     already written in Fase 4 but unused until that worker exists), and
- *     apply `whatsapp_oficial_registrar_status` idempotently on success/failure.
- *   - Media attachments are not supported by this route yet (text only) —
- *     mission explicitly allows deferring this ("Sem envio real de mídia
- *     nesta fase é aceitável").
+ * The RPC inserts the message, outbox row and conversation preview atomically.
+ * No Meta Graph API call happens here; the future outbox worker owns delivery.
  */
 
 const MAX_CONTENT_LENGTH = 4096
@@ -48,12 +34,8 @@ export async function POST(request: Request): Promise<Response> {
     const conversationId = typeof body?.conversationId === 'string' ? body.conversationId : ''
     const content = typeof body?.content === 'string' ? body.content.trim() : ''
 
-    if (!conversationId) {
-      throw new BadRequestError('conversationId is required')
-    }
-    if (!content) {
-      throw new BadRequestError('content is required')
-    }
+    if (!conversationId) throw new BadRequestError('conversationId is required')
+    if (!content) throw new BadRequestError('content is required')
     if (content.length > MAX_CONTENT_LENGTH) {
       throw new BadRequestError(`content exceeds ${MAX_CONTENT_LENGTH} characters`)
     }
@@ -66,54 +48,33 @@ export async function POST(request: Request): Promise<Response> {
     )
     if (!rl.success) return rateLimitResponse(rl)
 
-    const { data: message, error: insertError } = await admin
-      .from('whatsapp_messages')
-      .insert({
-        tenant_id: conversation.tenant_id,
-        conversation_id: conversation.id,
-        direction: 'outbound',
-        message_type: 'text',
-        content,
-        status: 'pendente',
-        enviado_por: userId,
-      })
-      .select('id, tenant_id, conversation_id, direction, message_type, content, status, enviado_por, created_at')
-      .single()
-
-    if (insertError || !message) {
-      console.error('[whatsapp-oficial/messages/send] failed to insert message:', insertError?.message)
-      return NextResponse.json({ error: 'Failed to send message' }, { status: 500 })
-    }
-
-    const { error: outboxError } = await admin.from('whatsapp_outbox').insert({
-      tenant_id: conversation.tenant_id,
-      canal_id: conversation.canal_id,
-      conversation_id: conversation.id,
-      message_id: (message as { id: string }).id,
-      tipo: 'mensagem',
-      payload: { content, message_type: 'text' },
-      status: 'pendente',
+    const { data, error } = await admin.rpc('whatsapp_oficial_enfileirar_mensagem', {
+      p_conversation_id: conversation.id,
+      p_content: content,
+      p_actor_user_id: userId,
     })
 
-    if (outboxError) {
-      // The message row already exists — surface the outbox failure but
-      // don't roll back the insert. An operator can find `pendente`
-      // messages with no matching outbox row and requeue them by hand
-      // until the worker exists; failing the whole request here would
-      // make the user retry and could enqueue a duplicate visible message.
-      console.error('[whatsapp-oficial/messages/send] failed to enqueue outbox row:', outboxError.message)
+    if (error) {
+      console.error('[whatsapp-oficial/messages/send] atomic enqueue RPC failed:', error.message)
+      return NextResponse.json({ error: 'Failed to queue message' }, { status: 500 })
     }
 
-    const preview = content.length > 200 ? `${content.slice(0, 200)}…` : content
-    const { error: previewError } = await admin
-      .from('whatsapp_conversations')
-      .update({ ultima_mensagem_em: new Date().toISOString(), ultima_mensagem_preview: preview })
-      .eq('id', conversation.id)
-    if (previewError) {
-      console.error('[whatsapp-oficial/messages/send] failed to update conversation preview:', previewError.message)
+    const result = data as {
+      ok: boolean
+      reason?: string
+      message?: Record<string, unknown>
+    }
+    if (!result?.ok || !result.message) {
+      const status =
+        result?.reason === 'lead_optout_ou_inativo' ||
+        result?.reason === 'canal_inativo' ||
+        result?.reason === 'conversa_encerrada'
+          ? 409
+          : 422
+      return NextResponse.json({ error: result?.reason ?? 'message_enqueue_rejected' }, { status })
     }
 
-    return NextResponse.json({ ok: true, message }, { status: 201 })
+    return NextResponse.json({ ok: true, message: result.message }, { status: 201 })
   } catch (error) {
     return toErrorResponse(error)
   }

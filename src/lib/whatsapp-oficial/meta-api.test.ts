@@ -43,7 +43,7 @@ describe('sendTextMessage', () => {
     expect(result).toEqual({ messageId: 'wamid.TEXT1' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('https://graph.facebook.com/v21.0/PNID/messages')
+    expect(url).toBe('https://graph.facebook.com/v24.0/PNID/messages')
     expect(init.headers).toMatchObject({ Authorization: 'Bearer tok' })
     const body = JSON.parse(init.body as string)
     expect(body).toMatchObject({

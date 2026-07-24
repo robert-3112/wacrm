@@ -32,7 +32,10 @@ function matchesFilters(row: Row, filters: Row): boolean {
 }
 
 function uniqueViolation() {
-  return { code: '23505', message: 'duplicate key value violates unique constraint' }
+  return {
+    code: '23505',
+    message: 'duplicate key value violates unique constraint',
+  }
 }
 
 function makeFakeDb() {
@@ -45,6 +48,7 @@ function makeFakeDb() {
     messageEvents: [] as Row[],
   }
   let seq = 0
+  let failInboundRpcOnce = false
   const nextId = (prefix: string) => `${prefix}-${++seq}`
 
   function tableArray(table: string): Row[] {
@@ -134,9 +138,15 @@ function makeFakeDb() {
     function doSelect(): { data: unknown; error: unknown } {
       const arr = tableArray(table)
       if (table === 'whatsapp_channels') {
-        return { data: arr.filter((r) => matchesFilters(r, filters)), error: null }
+        return {
+          data: arr.filter((r) => matchesFilters(r, filters)),
+          error: null,
+        }
       }
-      return { data: arr.find((r) => matchesFilters(r, filters)) ?? null, error: null }
+      return {
+        data: arr.find((r) => matchesFilters(r, filters)) ?? null,
+        error: null,
+      }
     }
 
     function terminal(): { data: unknown; error: unknown } {
@@ -187,7 +197,12 @@ function makeFakeDb() {
     let lead = state.leads.find((l) => l.tenant_id === tenantId && l.whatsapp === phone)
     let leadCreated = false
     if (!lead) {
-      lead = { id: nextId('lead'), tenant_id: tenantId, whatsapp: phone, status_saida: 'ativo' }
+      lead = {
+        id: nextId('lead'),
+        tenant_id: tenantId,
+        whatsapp: phone,
+        status_saida: 'ativo',
+      }
       state.leads.push(lead)
       leadCreated = true
     }
@@ -235,7 +250,8 @@ function makeFakeDb() {
         state.messages.push(row)
         messageId = row.id
         messageCreated = true
-        conversation.nao_lidas_corretor = ((conversation.nao_lidas_corretor as number | undefined) ?? 0) + 1
+        conversation.nao_lidas_corretor =
+          ((conversation.nao_lidas_corretor as number | undefined) ?? 0) + 1
         conversation.ultima_mensagem_preview = content
           ? String(content).slice(0, 200)
           : `[${row.message_type}]`
@@ -318,12 +334,19 @@ function makeFakeDb() {
 
   return {
     state,
+    failNextInboundRpc: () => {
+      failInboundRpcOnce = true
+    },
     from: (table: string) => builder(table),
     rpc: async (fn: string, args: Record<string, unknown>) => {
       if (fn === 'whatsapp_status_rank') {
         return { data: STATUS_RANK[args.p_status as string] ?? 0, error: null }
       }
       if (fn === 'whatsapp_oficial_processar_inbound') {
+        if (failInboundRpcOnce) {
+          failInboundRpcOnce = false
+          return { data: null, error: { message: 'transient database error' } }
+        }
         return { data: rpcProcessarInbound(args), error: null }
       }
       if (fn === 'whatsapp_oficial_registrar_status') {
@@ -346,7 +369,12 @@ vi.mock('@/lib/whatsapp-oficial/supabase-admin', () => ({
 
 import { GET, POST } from './route'
 
-const CHANNEL = { id: 'chan-1', tenant_id: 'sunt', status: 'ativo', phone_number_id: 'PNID-1' }
+const CHANNEL = {
+  id: 'chan-1',
+  tenant_id: 'sunt',
+  status: 'ativo',
+  phone_number_id: 'PNID-1',
+}
 const LEAD = { id: 'lead-1', tenant_id: 'sunt', whatsapp: '5511988887777' }
 
 function metaTextPayload(overrides: { wamid?: string; from?: string; body?: string } = {}) {
@@ -362,7 +390,10 @@ function metaTextPayload(overrides: { wamid?: string; from?: string; body?: stri
             field: 'messages',
             value: {
               messaging_product: 'whatsapp',
-              metadata: { display_phone_number: '+1', phone_number_id: CHANNEL.phone_number_id },
+              metadata: {
+                display_phone_number: '+1',
+                phone_number_id: CHANNEL.phone_number_id,
+              },
               contacts: [{ profile: { name: 'Maria' }, wa_id: from }],
               messages: [
                 {
@@ -381,11 +412,7 @@ function metaTextPayload(overrides: { wamid?: string; from?: string; body?: stri
   })
 }
 
-function metaStatusPayload(status: {
-  id: string
-  status: string
-  timestamp?: string
-}) {
+function metaStatusPayload(status: { id: string; status: string; timestamp?: string }) {
   return JSON.stringify({
     object: 'whatsapp_business_account',
     entry: [
@@ -396,7 +423,10 @@ function metaStatusPayload(status: {
             field: 'messages',
             value: {
               messaging_product: 'whatsapp',
-              metadata: { display_phone_number: '+1', phone_number_id: CHANNEL.phone_number_id },
+              metadata: {
+                display_phone_number: '+1',
+                phone_number_id: CHANNEL.phone_number_id,
+              },
               statuses: [
                 {
                   id: status.id,
@@ -414,7 +444,9 @@ function metaStatusPayload(status: {
 }
 
 function postWebhook(body: string, signature: string | null = sign(body)) {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
   if (signature) headers['x-hub-signature-256'] = signature
   return POST(
     new Request('http://localhost/api/whatsapp-oficial/webhook', {
@@ -479,6 +511,25 @@ describe('POST /api/whatsapp-oficial/webhook — idempotency (ADR D7)', () => {
     expect(fakeDb.state.webhookEvents).toHaveLength(1)
   })
 
+  it('reprocesses an event persisted before a transient RPC failure', async () => {
+    const body = metaTextPayload({ wamid: 'wamid.RETRY1' })
+    fakeDb.failNextInboundRpc()
+
+    const first = await postWebhook(body)
+    expect(first.status).toBe(503)
+    expect(fakeDb.state.messages).toHaveLength(0)
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents[0].processed_at).toBeNull()
+    expect(fakeDb.state.webhookEvents[0].processing_error).toBe('transient database error')
+
+    const second = await postWebhook(body)
+    expect(second.status).toBe(200)
+    expect(fakeDb.state.messages).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents[0].processed_at).not.toBeNull()
+    expect(fakeDb.state.webhookEvents[0].processing_error).toBeNull()
+  })
+
   it('creates only one whatsapp_conversations row across two different inbound messages from the same lead', async () => {
     await postWebhook(metaTextPayload({ wamid: 'wamid.A' }))
     await postWebhook(metaTextPayload({ wamid: 'wamid.B', body: 'segunda mensagem' }))
@@ -505,7 +556,11 @@ describe('POST /api/whatsapp-oficial/webhook — status transitions never regres
       status: 'lida',
     })
 
-    const body = metaStatusPayload({ id: 'wamid.OUT1', status: 'delivered', timestamp: '1700000200' })
+    const body = metaStatusPayload({
+      id: 'wamid.OUT1',
+      status: 'delivered',
+      timestamp: '1700000200',
+    })
     const res = await postWebhook(body)
     expect(res.status).toBe(200)
 
@@ -534,10 +589,22 @@ describe('POST /api/whatsapp-oficial/webhook — status transitions never regres
       status: 'enviada',
     })
 
-    await postWebhook(metaStatusPayload({ id: 'wamid.FWD1', status: 'delivered', timestamp: '1700000300' }))
+    await postWebhook(
+      metaStatusPayload({
+        id: 'wamid.FWD1',
+        status: 'delivered',
+        timestamp: '1700000300',
+      }),
+    )
     expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('entregue')
 
-    await postWebhook(metaStatusPayload({ id: 'wamid.FWD1', status: 'read', timestamp: '1700000400' }))
+    await postWebhook(
+      metaStatusPayload({
+        id: 'wamid.FWD1',
+        status: 'read',
+        timestamp: '1700000400',
+      }),
+    )
     expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('lida')
   })
 
@@ -557,7 +624,13 @@ describe('POST /api/whatsapp-oficial/webhook — status transitions never regres
       status: 'entregue',
     })
 
-    await postWebhook(metaStatusPayload({ id: 'wamid.FAIL1', status: 'failed', timestamp: '1700000500' }))
+    await postWebhook(
+      metaStatusPayload({
+        id: 'wamid.FAIL1',
+        status: 'failed',
+        timestamp: '1700000500',
+      }),
+    )
     expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('entregue')
   })
 
@@ -577,10 +650,22 @@ describe('POST /api/whatsapp-oficial/webhook — status transitions never regres
       status: 'falhou',
     })
 
-    await postWebhook(metaStatusPayload({ id: 'wamid.TERM1', status: 'delivered', timestamp: '1700000600' }))
+    await postWebhook(
+      metaStatusPayload({
+        id: 'wamid.TERM1',
+        status: 'delivered',
+        timestamp: '1700000600',
+      }),
+    )
     expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('falhou')
 
-    await postWebhook(metaStatusPayload({ id: 'wamid.TERM1', status: 'read', timestamp: '1700000700' }))
+    await postWebhook(
+      metaStatusPayload({
+        id: 'wamid.TERM1',
+        status: 'read',
+        timestamp: '1700000700',
+      }),
+    )
     expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('falhou')
   })
 })

@@ -60,7 +60,7 @@ interface MessageThreadProps {
   onConversationChanged: () => void;
   /** Mobile-only "back to list" affordance — the page hides the
    *  conversation list pane below `lg` while a thread is open (see
-   *  `(dashboard-oficial)/inbox/page.tsx`), so this is the only way back
+   *  `(dashboard-oficial)/whatsapp-oficial/inbox/page.tsx`), so this is the only way back
    *  without a browser-level back navigation. Rendered only when provided. */
   onBack?: () => void;
 }

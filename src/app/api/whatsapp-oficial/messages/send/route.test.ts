@@ -26,7 +26,16 @@ function jsonRequest(body: unknown) {
   })
 }
 
-function makeAdmin(overrides: { insertError?: unknown; outboxError?: unknown } = {}) {
+function makeAdmin(
+  overrides: {
+    rpcError?: { message: string }
+    result?: {
+      ok: boolean
+      reason?: string
+      message?: Record<string, unknown>
+    }
+  } = {},
+) {
   const insertedMessage = {
     id: 'msg-1',
     tenant_id: 'sunt',
@@ -39,30 +48,25 @@ function makeAdmin(overrides: { insertError?: unknown; outboxError?: unknown } =
     created_at: '2026-07-24T00:00:00Z',
   }
   return {
-    from: vi.fn((table: string) => {
-      if (table === 'whatsapp_messages') {
-        return {
-          insert: vi.fn(() => ({
-            select: vi.fn(() => ({
-              single: vi.fn().mockResolvedValue(
-                overrides.insertError
-                  ? { data: null, error: overrides.insertError }
-                  : { data: insertedMessage, error: null },
-              ),
-            })),
-          })),
-        }
-      }
-      if (table === 'whatsapp_outbox') {
-        return {
-          insert: vi.fn().mockResolvedValue({ error: overrides.outboxError ?? null }),
-        }
-      }
-      if (table === 'whatsapp_conversations') {
-        return { update: vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) })) }
-      }
-      throw new Error(`unexpected table ${table}`)
+    rpc: vi.fn().mockResolvedValue({
+      data: overrides.result ?? { ok: true, message: insertedMessage },
+      error: overrides.rpcError ?? null,
     }),
+  }
+}
+
+function authorizedContext(admin: ReturnType<typeof makeAdmin>) {
+  return {
+    userId: 'owner-corretor',
+    conversation: {
+      id: 'conv-1',
+      tenant_id: 'sunt',
+      canal_id: 'canal-1',
+      lead_id: 'lead-1',
+      status: 'aberta',
+    },
+    supabaseUser: {},
+    admin,
   }
 }
 
@@ -74,48 +78,31 @@ describe('POST /api/whatsapp-oficial/messages/send', () => {
 
   it('rejects a request with no session (401)', async () => {
     mocks.requireConversationAccess.mockRejectedValue(new UnauthorizedError())
-
     const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
-
     expect(res.status).toBe(401)
   })
 
-  it('rejects sending into a conversation the caller cannot see (404, not leaked as 403)', async () => {
-    // This is the authorization scenario the mission asks to cover: a
-    // corretor who is not the owner of the conversation's lead (and is not
-    // gestão) gets an RLS-empty result from requireConversationAccess,
-    // surfaced here as 404 — the route never reaches the admin-client write.
+  it('does not reveal a conversation hidden by RLS', async () => {
     mocks.requireConversationAccess.mockRejectedValue(new NotFoundError('Conversation not found'))
-
     const res = await POST(jsonRequest({ conversationId: 'conv-not-mine', content: 'Oi!' }))
-
     expect(res.status).toBe(404)
   })
 
-  it('rejects an empty content body before checking authorization', async () => {
+  it('rejects empty content before authorization', async () => {
     const res = await POST(jsonRequest({ conversationId: 'conv-1', content: '   ' }))
-
     expect(res.status).toBe(400)
     expect(mocks.requireConversationAccess).not.toHaveBeenCalled()
   })
 
-  it('rejects content over the max length', async () => {
-    const res = await POST(
-      jsonRequest({ conversationId: 'conv-1', content: 'a'.repeat(5000) }),
-    )
-
+  it('rejects content over the limit', async () => {
+    const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'a'.repeat(5000) }))
     expect(res.status).toBe(400)
     expect(mocks.requireConversationAccess).not.toHaveBeenCalled()
   })
 
-  it('inserts the message and enqueues an outbox row for an authorized caller', async () => {
+  it('uses the atomic enqueue RPC for an authorized caller', async () => {
     const admin = makeAdmin()
-    mocks.requireConversationAccess.mockResolvedValue({
-      userId: 'owner-corretor',
-      conversation: { id: 'conv-1', tenant_id: 'sunt', canal_id: 'canal-1', lead_id: 'lead-1', status: 'aberta' },
-      supabaseUser: {},
-      admin,
-    })
+    mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
 
     const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
     const json = await res.json()
@@ -123,21 +110,28 @@ describe('POST /api/whatsapp-oficial/messages/send', () => {
     expect(res.status).toBe(201)
     expect(json.ok).toBe(true)
     expect(json.message.id).toBe('msg-1')
-    expect(admin.from).toHaveBeenCalledWith('whatsapp_messages')
-    expect(admin.from).toHaveBeenCalledWith('whatsapp_outbox')
+    expect(admin.rpc).toHaveBeenCalledWith('whatsapp_oficial_enfileirar_mensagem', {
+      p_conversation_id: 'conv-1',
+      p_content: 'Oi!',
+      p_actor_user_id: 'owner-corretor',
+    })
   })
 
-  it('still succeeds (message already sent) even if the outbox insert fails', async () => {
-    const admin = makeAdmin({ outboxError: { message: 'db down' } })
-    mocks.requireConversationAccess.mockResolvedValue({
-      userId: 'owner-corretor',
-      conversation: { id: 'conv-1', tenant_id: 'sunt', canal_id: 'canal-1', lead_id: 'lead-1', status: 'aberta' },
-      supabaseUser: {},
-      admin,
-    })
+  it('fails closed when the atomic enqueue RPC fails', async () => {
+    const admin = makeAdmin({ rpcError: { message: 'db down' } })
+    mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
 
     const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
+    expect(res.status).toBe(500)
+  })
 
-    expect(res.status).toBe(201)
+  it('blocks an opt-out returned by the database gate', async () => {
+    const admin = makeAdmin({
+      result: { ok: false, reason: 'lead_optout_ou_inativo' },
+    })
+    mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
+
+    const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
+    expect(res.status).toBe(409)
   })
 })
