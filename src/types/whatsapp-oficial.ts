@@ -109,3 +109,234 @@ export interface WhatsAppInternalNote {
 /** Inbox list filter — mission item 1 ("aberta / pendente / encerrada /
  *  sem dono / urgente"), plus the implicit "all" default. */
 export type InboxFilter = 'todas' | 'aberta' | 'pendente' | 'encerrada' | 'sem_dono' | 'urgente'
+
+// ---------------------------------------------------------------------------
+// Gestão do canal oficial — canais, templates e campanhas (Sessão 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canal como as telas de gestão o enxergam.
+ *
+ * É um SUBCONJUNTO de `public.whatsapp_channels`, escolhido a dedo: nada aqui
+ * pode chegar perto de `access_token_cifrado`/`evolution_api_key_cifrado`. As
+ * telas precisam de nome, provider e status para escolher o canal e para
+ * explicar por que uma ação não está disponível (sync só existe em
+ * `meta_cloud`; canal `inativo` faz a RPC recusar o envio).
+ */
+export interface WhatsAppCanal {
+  id: string
+  nome: string
+  provider: string
+  status: string
+  numero_display: string | null
+  is_default: boolean
+}
+
+/** Espelha o CHECK de `whatsapp_templates.status_aprovacao` — mesmo
+ *  vocabulário que `mapMetaStatusToSunt` produz no sync. */
+export type TemplateStatusAprovacao =
+  | 'rascunho'
+  | 'pendente'
+  | 'aprovado'
+  | 'rejeitado'
+  | 'pausado'
+  | 'desabilitado'
+  | 'em_apelacao'
+  | 'exclusao_pendente'
+
+/** Variáveis exigidas por um botão (a posição no array É a identidade do
+ *  botão no envio — ver `template-send-builder`). */
+export interface TemplateBotaoVariaveis {
+  indice: number
+  tipo: string
+  variaveis: number[]
+}
+
+/** Conteúdo da coluna `whatsapp_templates.variaveis`, recalculada pelo banco
+ *  a cada sync. É a fonte que a RPC de enfileiramento confere. */
+export interface TemplateVariaveis {
+  cabecalho: number[]
+  corpo: number[]
+  botoes: TemplateBotaoVariaveis[]
+}
+
+/** Uma linha de `GET /api/whatsapp-oficial/templates` (o blob `componentes`
+ *  fica de fora de propósito — só o preview precisa dele). */
+export interface WhatsAppTemplate {
+  id: string
+  canal_id: string
+  meta_template_id: string | null
+  nome: string
+  idioma: string
+  categoria: string | null
+  status_aprovacao: TemplateStatusAprovacao
+  quality_score: string | null
+  corpo_texto: string | null
+  cabecalho_texto: string | null
+  cabecalho_formato: string | null
+  rodape_texto: string | null
+  variaveis: TemplateVariaveis | null
+  motivo_rejeicao: string | null
+  sincronizado_em: string | null
+}
+
+/** Resposta de `POST /api/whatsapp-oficial/templates/sync`. */
+export interface TemplateSyncResultado {
+  ok: true
+  total: number
+  inseridos: number
+  atualizados: number
+  inalterados: number
+  ignorados: number
+  truncado: boolean
+  erros: unknown[]
+  /** Só vem quando `truncado` — texto pronto, montado pela rota. */
+  aviso?: string
+}
+
+/** Preview textual renderizado — `botoes` vem do bloco BUTTONS do template. */
+export interface TemplatePreviewRenderizado {
+  cabecalho: string | null
+  corpo: string
+  rodape: string | null
+  botoes: { indice: number; tipo: string; texto: string }[]
+}
+
+export interface TemplatePreviewValidacao {
+  ok: boolean
+  faltando: { onde: 'cabecalho' | 'corpo'; exigidas: number; fornecidas: number }[]
+}
+
+/** Resposta de `POST /api/whatsapp-oficial/templates/preview`. */
+export interface TemplatePreviewResposta {
+  templateId: string
+  nome: string
+  idioma: string
+  statusAprovacao: TemplateStatusAprovacao
+  preview: TemplatePreviewRenderizado
+  variaveis: TemplateVariaveis
+  validacao: TemplatePreviewValidacao
+}
+
+/** Espelha o CHECK `whatsapp_broadcasts_status_check`. */
+export type CampanhaStatus =
+  | 'rascunho'
+  | 'aguardando_aprovacao'
+  | 'aprovado'
+  | 'enviando'
+  | 'pausado'
+  | 'concluido'
+  | 'cancelado'
+
+/** Uma linha de `GET /api/whatsapp-oficial/campanhas` (LISTA_SELECT da rota). */
+export interface CampanhaResumo {
+  id: string
+  tenant_id: string
+  canal_id: string
+  template_id: string | null
+  nome: string
+  status: CampanhaStatus
+  provider: string | null
+  politica_consentimento: string | null
+  bases_legais: string[] | null
+  agendado_para: string | null
+  criado_por: string | null
+  aprovado_por: string | null
+  aprovado_em: string | null
+  iniciado_em: string | null
+  concluido_em: string | null
+  pausado_em: string | null
+  cancelado_em: string | null
+  destinatarios_gerados_em: string | null
+  dry_run_em: string | null
+  total_destinatarios: number | null
+  total_suprimidos: number | null
+  total_enviados: number | null
+  total_entregues: number | null
+  total_lidos: number | null
+  total_falhas: number | null
+  created_at: string
+}
+
+/** `whatsapp_broadcasts.dry_run_resultado` — gravado tanto pelo dry-run
+ *  quanto pela materialização (as duas passam pelo mesmo cálculo). */
+export interface DryRunResultado {
+  elegiveis?: number
+  suprimidos?: number
+  por_motivo?: Record<string, number>
+  limite_aplicado?: number | null
+  gerado_em?: string
+}
+
+/** Detalhe completo (DETALHE_SELECT da rota `[id]`). */
+export interface CampanhaDetalhe extends CampanhaResumo {
+  mensagem_livre: string | null
+  segmentacao: Record<string, unknown> | null
+  variaveis_padrao: Record<string, unknown> | null
+  cadencia_segundos: number | null
+  limite_diario: number | null
+  lote_max: number | null
+  cooldown_dias: number | null
+  janela_inicio: string | null
+  janela_fim: string | null
+  janela_dias: number[] | null
+  empreendimento_id: string | null
+  empreendimento_slug: string | null
+  perfil_sophia: string | null
+  politica_handoff: string | null
+  handoff_config: Record<string, unknown> | null
+  pausado_por: string | null
+  cancelado_por: string | null
+  motivo_cancelamento: string | null
+  dry_run_resultado: DryRunResultado | null
+  ultimo_envio_em: string | null
+}
+
+/** Agregado que a rota de detalhe calcula em JS sobre
+ *  `whatsapp_broadcast_recipients` (só existe depois de materializar). */
+export interface DestinatariosAgregado {
+  total: number
+  truncado: boolean
+  por_status: Record<string, number>
+  por_motivo_supressao: Record<string, number>
+}
+
+export interface CampanhaDetalheResposta {
+  ok: true
+  campanha: CampanhaDetalhe
+  destinatarios: DestinatariosAgregado
+}
+
+/** Resposta de `POST /campanhas/[id]/destinatarios`. Os dois modos devolvem
+ *  formas diferentes: dry-run traz `a_enfileirar` + `amostra`, a
+ *  materialização traz `linhas_gravadas`. */
+export interface GerarDestinatariosResultado {
+  ok: true
+  dry_run: boolean
+  elegiveis: number
+  suprimidos: number
+  por_motivo: Record<string, number>
+  a_enfileirar?: number
+  linhas_gravadas?: number
+  amostra?: { lead_id: string; telefone: string }[]
+}
+
+/**
+ * Estado das travas de saída, resolvido NO SERVIDOR e passado pronto para a
+ * tela. Só booleanos derivados chegam ao cliente — nunca o nome ou o valor
+ * cru de uma env var.
+ */
+export interface TravasSaida {
+  /** `WHATSAPP_OUTBOUND_MODE` — 'shadow' significa que nada sai de verdade. */
+  modo: 'shadow' | 'live'
+  /** `WHATSAPP_BROADCAST_ENABLED` (env do worker). */
+  broadcastEnvLigado: boolean
+  /** `crm_config.whatsapp_broadcast_enabled` (kill switch no banco).
+   *  `null` = não foi possível ler (não assumir "ligado"). */
+  broadcastBancoLigado: boolean | null
+  /** Envio real habilitado por provider (já combina modo + trava do provider). */
+  envioMetaLigado: boolean
+  envioEvolutionLigado: boolean
+  /** `WHATSAPP_PILOT_MODE` — restringe destinatários reais à allowlist. */
+  pilotoLigado: boolean
+}
