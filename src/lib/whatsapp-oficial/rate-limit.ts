@@ -52,4 +52,20 @@ export const WHATSAPP_OFICIAL_RATE_LIMITS = {
    * loop or a compromised session.
    */
   inboxWriteAction: { limit: 30, windowMs: 60_000 },
+  /**
+   * Template sync (`/api/whatsapp-oficial/templates/sync`), keyed by user id.
+   * Each call can fan out to up to 20 paginated Meta requests, so this is the
+   * most expensive button in the product. Meta rate limits the Business
+   * Management API per WABA — a runaway sync loop would burn that budget and
+   * lock the account out of legitimate calls. 6/min is generous for a human
+   * clicking "sincronizar".
+   */
+  templateSync: { limit: 6, windowMs: 60_000 },
+  /**
+   * Campaign lifecycle writes (create / generate recipients / approve /
+   * pause / resume / cancel), keyed by user id. Deliberate, click-driven
+   * actions — and `gerar_destinatarios` scans the whole lead base, so a
+   * tight budget also protects the database.
+   */
+  campanhaWrite: { limit: 20, windowMs: 60_000 },
 } as const

@@ -341,6 +341,116 @@ describe('processOutboxBatch — permanent business blocks (dead-letter, no netw
   )
 })
 
+describe('processOutboxBatch — janela de 24h da Meta usa isTemplateJob, não job.tipo', () => {
+  // Regressão: a barreira testava `job.tipo !== 'template'` por conta própria, divergindo do
+  // predicado que o adapter meta_cloud usa para decidir se envia como template. Um job de
+  // campanha (`tipo = 'broadcast'`) com `template_name` no payload morria em dead-letter como
+  // 'fora_da_janela_24h' sem nunca chegar ao adapter — sendo que template é exatamente o que a
+  // Meta permite fora da janela. `isTemplateJob` (real, não mockado) é a única fonte de verdade.
+  //
+  // Campanhas TÊM de continuar com `tipo = 'broadcast'` para que a RPC de claim as mantenha
+  // atrás do kill switch, então quem tinha de mudar era a barreira.
+  beforeEach(() => {
+    vi.mocked(isInsideFreeFormWindow).mockReturnValue(false)
+  })
+
+  it('broadcast COM template_name fora da janela não morre — chega em simulado no shadow', async () => {
+    const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta_lancamento' } })
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    // Kill switch de broadcast LIGADO: a barreira (c) não é o que está sendo testado aqui.
+    const flags = makeFlags({ mode: 'shadow', broadcastEnabled: true })
+
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+
+    expect(result.simulated).toBe(1)
+    expect(result.blocked).toBe(0)
+    expect(result.deadLettered).toBe(0)
+
+    const outboxUpdate = outboxUpdates(calls)
+    expect(outboxUpdate).toHaveLength(1)
+    expect(outboxUpdate[0].values).toMatchObject({ status: 'simulado' })
+    expect(outboxUpdate[0].values?.dead_letter_at).toBeUndefined()
+    expect(auditInserts(calls)[0].values).toMatchObject({
+      decisao: 'simulado',
+      motivo: 'modo_shadow',
+    })
+
+    // shadow honesto: nada de rede, nada de credencial, whatsapp_messages intacta
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(messageUpdates(calls)).toHaveLength(0)
+  })
+
+  it('broadcast SEM template_name fora da janela CONTINUA morrendo com fora_da_janela_24h', async () => {
+    // A proteção da Meta não pode ter sido afrouxada: texto livre fora da janela é rejeitado
+    // pela API e queima reputação do número.
+    const job = makeJob({ tipo: 'broadcast', payload: { content: 'promoção!', message_type: 'text' } })
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const flags = makeFlags({ mode: 'live', broadcastEnabled: true })
+
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+
+    expect(result.blocked).toBe(1)
+    expect(result.simulated).toBe(0)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({
+      status: 'morto',
+      last_error_code: 'fora_da_janela_24h',
+    })
+    expect(auditInserts(calls)[0].values).toMatchObject({
+      decisao: 'bloqueado',
+      motivo: 'fora_da_janela_24h',
+    })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+  })
+
+  it('mensagem avulsa fora da janela continua morrendo (nada regrediu)', async () => {
+    const job = makeJob({ tipo: 'mensagem' })
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const flags = makeFlags({ mode: 'live' })
+
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+
+    expect(result.blocked).toBe(1)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({
+      status: 'morto',
+      last_error_code: 'fora_da_janela_24h',
+    })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('tipo=template fora da janela também passa (o outro braço do predicado)', async () => {
+    const job = makeJob({ tipo: 'template', payload: { template_name: 'boas_vindas' } })
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const flags = makeFlags({ mode: 'shadow' })
+
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+
+    expect(result.simulated).toBe(1)
+    expect(result.blocked).toBe(0)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'simulado' })
+  })
+
+  it('provider evolution fora da janela NÃO é bloqueado — a regra é só da Meta', async () => {
+    const job = makeJob({
+      provider: 'evolution',
+      phone_number_id: null,
+      waba_id: null,
+      evolution_base_url: 'https://evo.local',
+      evolution_instance: 'sunt',
+    })
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const flags = makeFlags({ mode: 'shadow' })
+
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+
+    expect(result.blocked).toBe(0)
+    expect(result.simulated).toBe(1)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'simulado' })
+  })
+})
+
 describe('processOutboxBatch — temporary blocks (requeue, not dead-letter)', () => {
   it('broadcast with broadcastEnabled=false goes back to pendente, not morto', async () => {
     const job = makeJob({ tipo: 'broadcast' })

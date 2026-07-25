@@ -46,9 +46,13 @@ function makeFakeDb() {
     conversations: [] as Row[],
     messages: [] as Row[],
     messageEvents: [] as Row[],
+    templates: [] as Row[],
+    /** Args de cada chamada a whatsapp_oficial_registrar_status_template. */
+    templateRpcCalls: [] as Row[],
   }
   let seq = 0
   let failInboundRpcOnce = false
+  let failTemplateRpcOnce = false
   const nextId = (prefix: string) => `${prefix}-${++seq}`
 
   function tableArray(table: string): Row[] {
@@ -332,10 +336,59 @@ function makeFakeDb() {
     }
   }
 
+  // Mirrors public.whatsapp_oficial_registrar_status_template
+  // (supabase/migrations/20260725120000_whatsapp_templates_sync.sql): casa por
+  // (tenant, canal, nome[, idioma]), aplica coalesce em status/score/motivo e
+  // NÃO cria linha — template desconhecido volta ok=true, atualizado=false,
+  // porque o webhook não carrega os componentes.
+  const META_STATUS_TO_SUNT: Record<string, string> = {
+    APPROVED: 'aprovado',
+    REJECTED: 'rejeitado',
+    PAUSED: 'pausado',
+    DISABLED: 'desabilitado',
+    IN_APPEAL: 'em_apelacao',
+    PENDING_DELETION: 'exclusao_pendente',
+    DRAFT: 'rascunho',
+    PENDING: 'pendente',
+    PENDING_REVIEW: 'pendente',
+  }
+
+  function rpcRegistrarStatusTemplate(args: Record<string, unknown>) {
+    state.templateRpcCalls.push({ ...args })
+
+    const tenantId = ((args.p_tenant_id as string) ?? '').trim()
+    const canalId = args.p_canal_id as string | null
+    const nome = ((args.p_nome as string) ?? '').trim()
+    if (!tenantId || !canalId || !nome) return { ok: false, reason: 'parametros_invalidos' }
+
+    const idioma = ((args.p_idioma as string | null) ?? '').trim() || null
+    const rawStatus = ((args.p_status as string | null) ?? '').trim()
+    const status = rawStatus ? (META_STATUS_TO_SUNT[rawStatus.toUpperCase()] ?? 'pendente') : null
+    const quality = ((args.p_quality_score as string | null) ?? '').trim().toUpperCase() || null
+    const motivo = ((args.p_motivo as string | null) ?? '').trim() || null
+
+    const row = state.templates.find(
+      (t) =>
+        t.tenant_id === tenantId &&
+        t.canal_id === canalId &&
+        t.nome === nome &&
+        (idioma === null || t.idioma === idioma),
+    )
+    if (!row) return { ok: true, atualizado: false, reason: 'template_desconhecido' }
+
+    row.status_aprovacao = status ?? row.status_aprovacao
+    row.quality_score = quality ?? row.quality_score
+    row.motivo_rejeicao = status === 'aprovado' ? null : (motivo ?? row.motivo_rejeicao)
+    return { ok: true, atualizado: true, template_id: row.id }
+  }
+
   return {
     state,
     failNextInboundRpc: () => {
       failInboundRpcOnce = true
+    },
+    failNextTemplateRpc: () => {
+      failTemplateRpcOnce = true
     },
     from: (table: string) => builder(table),
     rpc: async (fn: string, args: Record<string, unknown>) => {
@@ -351,6 +404,14 @@ function makeFakeDb() {
       }
       if (fn === 'whatsapp_oficial_registrar_status') {
         return { data: rpcRegistrarStatus(args), error: null }
+      }
+      if (fn === 'whatsapp_oficial_registrar_status_template') {
+        if (failTemplateRpcOnce) {
+          failTemplateRpcOnce = false
+          state.templateRpcCalls.push({ ...args })
+          return { data: null, error: { message: 'transient template rpc error' } }
+        }
+        return { data: rpcRegistrarStatusTemplate(args), error: null }
       }
       return { data: null, error: null }
     },
@@ -374,8 +435,21 @@ const CHANNEL = {
   tenant_id: 'sunt',
   status: 'ativo',
   phone_number_id: 'PNID-1',
+  // Eventos de template não trazem phone_number_id — o canal é achado pelo
+  // WABA id que vem em `entry.id`.
+  waba_id: 'WABA-1',
 }
 const LEAD = { id: 'lead-1', tenant_id: 'sunt', whatsapp: '5511988887777' }
+const TEMPLATE = {
+  id: 'tpl-1',
+  tenant_id: 'sunt',
+  canal_id: CHANNEL.id,
+  nome: 'boas_vindas',
+  idioma: 'pt_BR',
+  status_aprovacao: 'pendente',
+  quality_score: null,
+  motivo_rejeicao: null,
+}
 
 function metaTextPayload(overrides: { wamid?: string; from?: string; body?: string } = {}) {
   const wamid = overrides.wamid ?? 'wamid.MSG1'
@@ -443,6 +517,31 @@ function metaStatusPayload(status: { id: string; status: string; timestamp?: str
   })
 }
 
+/**
+ * Evento de lifecycle de template. `value` NÃO tem metadata/phone_number_id —
+ * é outra forma de payload, e `entry.id` é o WABA id.
+ *
+ * `omitTime` reproduz as entregas em que a Meta não manda `entry.time`
+ * (JSON.stringify some com a chave undefined) — o caso em que a chave de dedup
+ * deixa de ser estável.
+ */
+function metaTemplatePayload(
+  field: string,
+  value: Record<string, unknown>,
+  opts: { wabaId?: string; time?: number; omitTime?: boolean } = {},
+) {
+  return JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: opts.wabaId ?? CHANNEL.waba_id,
+        time: opts.omitTime ? undefined : (opts.time ?? 1700000900),
+        changes: [{ field, value }],
+      },
+    ],
+  })
+}
+
 function postWebhook(body: string, signature: string | null = sign(body)) {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -461,6 +560,7 @@ beforeEach(() => {
   fakeDb = makeFakeDb()
   fakeDb.state.channels.push({ ...CHANNEL })
   fakeDb.state.leads.push({ ...LEAD })
+  fakeDb.state.templates.push({ ...TEMPLATE })
   __resetRateLimitForTests()
 })
 
@@ -667,6 +767,354 @@ describe('POST /api/whatsapp-oficial/webhook — status transitions never regres
       }),
     )
     expect(fakeDb.state.messages.find((m) => m.id === 'msg-seed')?.status).toBe('falhou')
+  })
+})
+
+describe('POST /api/whatsapp-oficial/webhook — template lifecycle', () => {
+  it('status update chama a RPC com nome/idioma/status/motivo e aplica no template', async () => {
+    const res = await postWebhook(
+      metaTemplatePayload('message_template_status_update', {
+        event: 'REJECTED',
+        message_template_id: 123456,
+        message_template_name: 'boas_vindas',
+        message_template_language: 'pt_BR',
+        reason: 'INVALID_FORMAT',
+      }),
+    )
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.templateRpcCalls).toHaveLength(1)
+    expect(fakeDb.state.templateRpcCalls[0]).toMatchObject({
+      p_tenant_id: 'sunt',
+      p_canal_id: CHANNEL.id,
+      p_nome: 'boas_vindas',
+      p_idioma: 'pt_BR',
+      p_status: 'REJECTED',
+      p_motivo: 'INVALID_FORMAT',
+      p_quality_score: null,
+    })
+
+    expect(fakeDb.state.templates[0]).toMatchObject({
+      status_aprovacao: 'rejeitado',
+      motivo_rejeicao: 'INVALID_FORMAT',
+    })
+
+    // O evento cru fica registrado com o event_type que o CHECK da tabela aceita.
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents[0]).toMatchObject({
+      event_type: 'template_status',
+      canal_id: CHANNEL.id,
+    })
+    expect(fakeDb.state.webhookEvents[0].processed_at).not.toBeNull()
+    expect(fakeDb.state.webhookEvents[0].processing_error).toBeNull()
+  })
+
+  it('quality update passa p_status null — o score muda, o status é preservado', async () => {
+    fakeDb.state.templates[0].status_aprovacao = 'aprovado'
+
+    const res = await postWebhook(
+      metaTemplatePayload('message_template_quality_update', {
+        message_template_id: 123456,
+        message_template_name: 'boas_vindas',
+        message_template_language: 'pt_BR',
+        previous_quality_score: 'GREEN',
+        new_quality_score: 'YELLOW',
+      }),
+    )
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.templateRpcCalls[0]).toMatchObject({
+      p_status: null,
+      p_quality_score: 'YELLOW',
+    })
+    // p_status null faz a RPC coalescer para o status atual — quality não pode
+    // rebaixar um template aprovado.
+    expect(fakeDb.state.templates[0]).toMatchObject({
+      status_aprovacao: 'aprovado',
+      quality_score: 'YELLOW',
+    })
+  })
+
+  it('template ainda não sincronizado (atualizado=false) devolve 200 e só registra o motivo', async () => {
+    const res = await postWebhook(
+      metaTemplatePayload('message_template_status_update', {
+        event: 'APPROVED',
+        message_template_name: 'template_que_nunca_sincronizou',
+        message_template_language: 'pt_BR',
+      }),
+    )
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.webhookEvents[0].processed_at).not.toBeNull()
+    expect(fakeDb.state.webhookEvents[0].processing_error).toBe('template_desconhecido')
+    // não inventou linha: o webhook não carrega componentes
+    expect(fakeDb.state.templates).toHaveLength(1)
+  })
+
+  it('components_update é registrado sem chamar a RPC (a Meta não manda os componentes)', async () => {
+    const res = await postWebhook(
+      metaTemplatePayload('message_template_components_update', {
+        message_template_id: 123456,
+        message_template_name: 'boas_vindas',
+        message_template_language: 'pt_BR',
+      }),
+    )
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.templateRpcCalls).toHaveLength(0)
+    expect(fakeDb.state.webhookEvents[0].processing_error).toContain('sync de templates')
+    expect(fakeDb.state.templates[0].status_aprovacao).toBe('pendente')
+  })
+
+  it('falha na RPC de template não impede a mensagem inbound do mesmo lote — e ainda devolve 503', async () => {
+    // Duas exigências que brigam: a mensagem inbound é dado do cliente e não se
+    // recupera sozinha (o lote precisa continuar depois do erro), mas responder
+    // 200 PERDERIA a transição de template de vez — a Meta só reentrega em
+    // resposta non-2xx e ninguém varre whatsapp_webhook_events com
+    // processed_at IS NULL. Logo: processa tudo, responde 503 no fim.
+    fakeDb.failNextTemplateRpc()
+
+    const body = JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: CHANNEL.waba_id,
+          time: 1700000900,
+          changes: [
+            {
+              field: 'message_template_status_update',
+              value: {
+                event: 'APPROVED',
+                message_template_name: 'boas_vindas',
+                message_template_language: 'pt_BR',
+              },
+            },
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: {
+                  display_phone_number: '+1',
+                  phone_number_id: CHANNEL.phone_number_id,
+                },
+                contacts: [{ profile: { name: 'Maria' }, wa_id: LEAD.whatsapp }],
+                messages: [
+                  {
+                    id: 'wamid.MIX1',
+                    from: LEAD.whatsapp,
+                    timestamp: '1700000000',
+                    type: 'text',
+                    text: { body: 'ola' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    })
+
+    const res = await postWebhook(body)
+
+    // 503 = "Meta, reenvia" — a única coisa que realmente retoma o evento.
+    expect(res.status).toBe(503)
+    // ...e mesmo assim o lote inteiro rodou: a mensagem inbound está gravada.
+    expect(fakeDb.state.messages).toHaveLength(1)
+    expect(fakeDb.state.messages[0].wamid).toBe('wamid.MIX1')
+
+    // o evento de template ficou com processing_error e processed_at null,
+    // então a redelivery da Meta o retoma (e o dedup insert-first faz a
+    // mensagem inbound já processada ser pulada na volta)
+    const templateEvent = fakeDb.state.webhookEvents.find(
+      (e) => e.event_type === 'template_status',
+    )
+    expect(templateEvent?.processing_error).toBe('transient template rpc error')
+    expect(templateEvent?.processed_at).toBeNull()
+    // o template continuou intocado
+    expect(fakeDb.state.templates[0].status_aprovacao).toBe('pendente')
+
+    // a redelivery reaplica só o que faltava
+    const retry = await postWebhook(body)
+    expect(retry.status).toBe(200)
+    expect(fakeDb.state.messages).toHaveLength(1)
+    expect(fakeDb.state.templates[0].status_aprovacao).toBe('aprovado')
+  })
+
+  it('template desconhecido não é falha transitória: o lote inteiro responde 200', async () => {
+    // { ok: true, atualizado: false } é informação, não erro — reentregar não
+    // mudaria nada, então esse caso NÃO pode escorregar para o 503.
+    const body = JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: CHANNEL.waba_id,
+          time: 1700000900,
+          changes: [
+            {
+              field: 'message_template_status_update',
+              value: {
+                event: 'APPROVED',
+                message_template_name: 'template_que_nunca_sincronizou',
+                message_template_language: 'pt_BR',
+              },
+            },
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: {
+                  display_phone_number: '+1',
+                  phone_number_id: CHANNEL.phone_number_id,
+                },
+                contacts: [{ profile: { name: 'Maria' }, wa_id: LEAD.whatsapp }],
+                messages: [
+                  {
+                    id: 'wamid.MIX2',
+                    from: LEAD.whatsapp,
+                    timestamp: '1700000000',
+                    type: 'text',
+                    text: { body: 'ola' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    })
+
+    const res = await postWebhook(body)
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.messages).toHaveLength(1)
+    const templateEvent = fakeDb.state.webhookEvents.find(
+      (e) => e.event_type === 'template_status',
+    )
+    expect(templateEvent?.processed_at).not.toBeNull()
+    expect(templateEvent?.processing_error).toBe('template_desconhecido')
+  })
+
+  it('status update sem message_template_language é registrado e ignorado (não exercita o curinga da RPC)', async () => {
+    // `p_idioma` null casa com TODAS as variantes de idioma na RPC
+    // (`v_idioma is null or t.idioma = v_idioma`). Um APPROVED sem idioma
+    // promoveria junto o en_US que a Meta rejeitou, e ele passaria a satisfazer
+    // o gate `status_aprovacao <> 'aprovado'` de enfileirar_template.
+    fakeDb.state.templates.push({
+      ...TEMPLATE,
+      id: 'tpl-en',
+      idioma: 'en_US',
+      status_aprovacao: 'rejeitado',
+      motivo_rejeicao: 'INVALID_FORMAT',
+    })
+
+    const res = await postWebhook(
+      metaTemplatePayload('message_template_status_update', {
+        event: 'APPROVED',
+        message_template_id: 123456,
+        message_template_name: 'boas_vindas',
+      }),
+    )
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.templateRpcCalls).toHaveLength(0)
+    // nenhuma das duas variantes se mexeu
+    expect(fakeDb.state.templates.map((t) => t.status_aprovacao)).toEqual([
+      'pendente',
+      'rejeitado',
+    ])
+    // mas o evento cru ficou registrado, com o motivo do descarte
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents[0].processed_at).not.toBeNull()
+    expect(fakeDb.state.webhookEvents[0].processing_error).toContain(
+      'message_template_language',
+    )
+  })
+
+  it('duas transições iguais sem entry.time não colapsam em replay', async () => {
+    // Sem `entry.time` a chave (nome:idioma:field:status) se repete em toda
+    // transição para o MESMO status. PAUSED → APPROVED → PAUSED: a terceira
+    // colidiria com a primeira e seria descartada, deixando o template
+    // 'aprovado' no SUNT enquanto está pausado na Meta.
+    const pausado = metaTemplatePayload(
+      'message_template_status_update',
+      {
+        event: 'PAUSED',
+        message_template_name: 'boas_vindas',
+        message_template_language: 'pt_BR',
+      },
+      { omitTime: true },
+    )
+    const aprovado = metaTemplatePayload(
+      'message_template_status_update',
+      {
+        event: 'APPROVED',
+        message_template_name: 'boas_vindas',
+        message_template_language: 'pt_BR',
+      },
+      { omitTime: true },
+    )
+
+    await postWebhook(pausado)
+    await postWebhook(aprovado)
+    await postWebhook(pausado)
+
+    expect(fakeDb.state.templateRpcCalls).toHaveLength(3)
+    expect(fakeDb.state.templateRpcCalls.filter((c) => c.p_status === 'PAUSED')).toHaveLength(2)
+    expect(fakeDb.state.webhookEvents).toHaveLength(3)
+    // o que importa: o último estado real da Meta venceu
+    expect(fakeDb.state.templates[0].status_aprovacao).toBe('pausado')
+  })
+
+  it('com entry.time, a redelivery literal continua sendo descartada', async () => {
+    // A chave não-colidente vale SÓ para o caso sem `entry.time` — quando a
+    // Meta manda o instante da entrega, dedup continua valendo.
+    const body = metaTemplatePayload(
+      'message_template_status_update',
+      {
+        event: 'PAUSED',
+        message_template_name: 'boas_vindas',
+        message_template_language: 'pt_BR',
+      },
+      { time: 1700001234 },
+    )
+
+    await postWebhook(body)
+    await postWebhook(body)
+
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.templateRpcCalls).toHaveLength(1)
+  })
+
+  it('não reprocessa uma redelivery do mesmo evento de template', async () => {
+    const body = metaTemplatePayload('message_template_status_update', {
+      event: 'APPROVED',
+      message_template_name: 'boas_vindas',
+      message_template_language: 'pt_BR',
+    })
+
+    await postWebhook(body)
+    await postWebhook(body)
+
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.templateRpcCalls).toHaveLength(1)
+  })
+
+  it('WABA id desconhecido é logado e ignorado, ainda com 200 (nada para registrar sem canal)', async () => {
+    const res = await postWebhook(
+      metaTemplatePayload(
+        'message_template_status_update',
+        {
+          event: 'APPROVED',
+          message_template_name: 'boas_vindas',
+          message_template_language: 'pt_BR',
+        },
+        { wabaId: 'WABA-DE-OUTRA-CONTA' },
+      ),
+    )
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.webhookEvents).toHaveLength(0)
+    expect(fakeDb.state.templateRpcCalls).toHaveLength(0)
   })
 })
 

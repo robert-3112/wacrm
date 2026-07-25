@@ -53,12 +53,71 @@ export class BadRequestError extends Error {
   }
 }
 
+export class ForbiddenError extends Error {
+  readonly status = 403 as const
+  constructor(message = 'Forbidden') {
+    super(message)
+    this.name = 'ForbiddenError'
+  }
+}
+
 export function toErrorResponse(err: unknown): NextResponse {
-  if (err instanceof UnauthorizedError || err instanceof NotFoundError || err instanceof BadRequestError) {
+  if (
+    err instanceof UnauthorizedError ||
+    err instanceof NotFoundError ||
+    err instanceof BadRequestError ||
+    err instanceof ForbiddenError
+  ) {
     return NextResponse.json({ error: err.message }, { status: err.status })
+  }
+  // A RPC devolve 42501 (insufficient_privilege) quando o ator nao tem papel de gestao ou nao
+  // pode agir sobre aquele tenant. Ela e a AUTORIDADE — a rota so repassa como 403.
+  if (isPostgrestPermissionError(err)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   console.error('[whatsapp-oficial/api-auth] uncategorized error:', err)
   return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+}
+
+/** PostgREST devolve o SQLSTATE em `code`; 42501 = insufficient_privilege. */
+export function isPostgrestPermissionError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const e = err as { code?: unknown; message?: unknown }
+  if (e.code === '42501') return true
+  return typeof e.message === 'string' && /sem_permissao|service_role_required/.test(e.message)
+}
+
+export interface GestaoAccessContext {
+  /** `auth.uid()` do chamador. Vai para a RPC, que é quem valida o papel de verdade. */
+  userId: string
+  /** Cliente com a sessão do usuário — leituras continuam sujeitas a RLS. */
+  supabaseUser: SupabaseClient
+  /** service_role — bypassa RLS. Só para chamar a RPC que fará a checagem de papel. */
+  admin: SupabaseClient
+}
+
+/**
+ * Gate das rotas de gestão que NÃO têm uma conversa contra a qual provar RLS
+ * (templates e campanhas).
+ *
+ * Diferença deliberada em relação a {@link requireConversationAccess}: aqui a
+ * rota só prova que existe uma SESSÃO e extrai o `user_id`. Quem decide se
+ * aquele usuário é owner/admin/gestor daquele tenant é a própria RPC, no
+ * Postgres, via `whatsapp_campanha_ator_autorizado` — mesma escolha de
+ * `whatsapp_oficial_enfileirar_mensagem`, que revalida o ator em `app_roles`
+ * em vez de confiar num pré-check da aplicação. Duplicar a regra de papel aqui
+ * criaria dois lugares para ela divergir; a autoridade fica onde o dado está.
+ */
+export async function requireGestaoSession(): Promise<GestaoAccessContext> {
+  const supabaseUser = await createClient()
+  const {
+    data: { user },
+    error: authError,
+  } = await supabaseUser.auth.getUser()
+  if (authError || !user) {
+    throw new UnauthorizedError()
+  }
+  return { userId: user.id, supabaseUser, admin: supabaseAdmin() }
 }
 
 export interface ConversationAccessRow {

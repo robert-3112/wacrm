@@ -47,6 +47,7 @@ import { isSendEnabledFor, type WhatsappFlags } from './env-flags'
 import { isAllowlisted } from './allowlist'
 import { isInsideFreeFormWindow } from './meta-window'
 import { getAdapter } from './adapters'
+import { isTemplateJob } from './adapters/meta-cloud'
 import type { OutboundAdapter, OutboxJob } from './adapters/types'
 import { ChannelCredentialMissingError, loadChannelCredential } from './channel-credentials'
 
@@ -183,9 +184,13 @@ function detectPermanentBlock(job: OutboxJob, adapter: OutboundAdapter, now: Dat
   if (job.conversa_status === 'encerrada') return 'conversa_encerrada'
   if (!job.lead_whatsapp) return 'destinatario_ausente'
   if (!adapter.isConfigured(job)) return 'canal_nao_configurado'
+  // Fora da janela de 24h a Meta só aceita template. `isTemplateJob` é o MESMO predicado que o
+  // adapter meta_cloud usa para decidir se envia como template — antes esta barreira testava
+  // `job.tipo !== 'template'` por conta própria, e um job de campanha (tipo='broadcast') com
+  // template_name no payload morria aqui, em dead-letter, sem nunca chegar ao adapter.
   if (
     job.provider === 'meta_cloud' &&
-    job.tipo !== 'template' &&
+    !isTemplateJob(job) &&
     !isInsideFreeFormWindow(job.ultimo_inbound_em, now)
   ) {
     return 'fora_da_janela_24h'

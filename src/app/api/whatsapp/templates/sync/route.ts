@@ -2,6 +2,11 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { normalizeStatus } from '@/lib/whatsapp/template-status-normalize'
+import {
+  fetchMetaTemplates,
+  MetaTemplateFetchError,
+  META_TEMPLATE_PAGE_CAP,
+} from '@/lib/whatsapp-oficial/meta-templates'
 import type { TemplateButton, TemplateSampleValues } from '@/types'
 
 /**
@@ -17,8 +22,12 @@ import type { TemplateButton, TemplateSampleValues } from '@/types'
  * they remain visible so the user can notice drift and clean up.
  */
 
-const META_API_VERSION = 'v21.0'
-const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+/**
+ * A paginação contra a Meta vive em `@/lib/whatsapp-oficial/meta-templates`, compartilhada com
+ * o sync canal-scoped do SUNT — antes eram duas cópias do mesmo laço, e esta aqui ainda estava
+ * presa em `v21.0` enquanto o resto do deploy já falava v24.0. A persistência abaixo continua
+ * sendo a do WACRM (account-scoped, colunas por campo) e não foi tocada.
+ */
 
 interface MetaButton {
   type: string
@@ -178,36 +187,21 @@ export async function POST() {
 
     const accessToken = decrypt(config.access_token)
 
-    const metaTemplates: MetaTemplate[] = []
-    let nextUrl:
-      | string
-      | null = `${META_API_BASE}/${config.waba_id}/message_templates?limit=100&fields=id,name,language,status,category,components,quality_score`
-    const PAGE_CAP = 20
-    let pageCount = 0
-
-    while (nextUrl && pageCount < PAGE_CAP) {
-      pageCount++
-      const metaRes: Response = await fetch(nextUrl, {
-        headers: { Authorization: `Bearer ${accessToken}` },
+    let metaTemplates: MetaTemplate[]
+    let truncated: boolean
+    try {
+      const page = await fetchMetaTemplates({
+        wabaId: config.waba_id,
+        accessToken,
+        pageCap: META_TEMPLATE_PAGE_CAP,
       })
-
-      if (!metaRes.ok) {
-        let metaErr = `Meta API error: ${metaRes.status}`
-        try {
-          const body = await metaRes.json()
-          if (body?.error?.message) metaErr = body.error.message
-        } catch {
-          // response wasn't JSON — keep the fallback
-        }
-        return NextResponse.json({ error: metaErr }, { status: 502 })
+      metaTemplates = page.templates as MetaTemplate[]
+      truncated = page.truncated
+    } catch (err) {
+      if (err instanceof MetaTemplateFetchError) {
+        return NextResponse.json({ error: err.message }, { status: 502 })
       }
-
-      const metaBody: {
-        data?: MetaTemplate[]
-        paging?: { next?: string }
-      } = await metaRes.json()
-      if (metaBody.data) metaTemplates.push(...metaBody.data)
-      nextUrl = metaBody.paging?.next ?? null
+      throw err
     }
 
     let inserted = 0
@@ -307,7 +301,7 @@ export async function POST() {
       inserted,
       updated,
       errors,
-      truncated: pageCount >= PAGE_CAP && nextUrl !== null,
+      truncated,
     })
   } catch (error) {
     console.error('Error syncing WhatsApp templates:', error)

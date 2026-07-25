@@ -4,6 +4,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp-oficial/webhook-signature'
 import { supabaseAdmin } from '@/lib/whatsapp-oficial/supabase-admin'
 import { mapMetaStatusToDb } from '@/lib/whatsapp-oficial/status'
+import { normalizeQualityScore } from '@/lib/whatsapp-oficial/meta-templates'
 import { isValidLeadPhone, normalizePhoneDigits } from '@/lib/whatsapp-oficial/phone'
 import {
   WHATSAPP_OFICIAL_RATE_LIMITS,
@@ -20,7 +21,7 @@ import {
  *        `META_WEBHOOK_VERIFY_TOKEN` env var is compared instead, matching
  *        `docs/runbooks/META-CLOUD-SETUP-SUNT.md` step 2, which documents
  *        it as "você escolhe essa string", not per-channel Meta config).
- * POST — inbound message + status events. Idempotent insert-first into
+ * POST — inbound message + status + template-lifecycle events. Idempotent insert-first into
  *        `whatsapp_webhook_events` (ADR D7) BEFORE any side-effect write;
  *        status transitions never regress (ADR D7, via
  *        `public.whatsapp_status_rank`). WRITTEN FROM SCRATCH — the WACRM
@@ -37,7 +38,11 @@ import {
  * `after()` in tests). If a bug throws mid-processing anyway, the raw
  * event already landed in `whatsapp_webhook_events` (inserted before any
  * downstream write) — see `whatsapp_webhook_events_unprocessed_idx` for
- * the reprocessing/audit trail this leaves.
+ * the audit trail this leaves. Esse índice é AUDITORIA, não fila: nada
+ * neste repositório varre `processed_at IS NULL`, então quem retoma um
+ * evento falho é a redelivery da Meta — e ela só acontece se a resposta
+ * for non-2xx (ver `processWebhookBody`, que coleta as falhas do lote e
+ * devolve 503 no fim).
  */
 
 // ============================================================
@@ -90,9 +95,36 @@ interface MetaWebhookChangeValue {
   statuses?: MetaWebhookStatus[]
 }
 
+/**
+ * `message_template_*` events carry a completely different `value` shape:
+ * no `metadata.phone_number_id`, no `messages`/`statuses`. The channel is
+ * resolved from the WABA id in `entry.id` instead (see
+ * `processTemplateLifecycleChange`).
+ *
+ * ADAPTED from `src/lib/whatsapp/template-webhook.ts` (WACRM) — the field
+ * names are Meta's, but the WACRM handler keys off `meta_template_id` to
+ * UPDATE its account-scoped `message_templates` table directly. Here the
+ * key is (tenant, canal, nome, idioma) and the write goes through the
+ * `whatsapp_oficial_registrar_status_template` RPC, because
+ * `whatsapp_templates` is tenant-scoped and only service_role may touch it.
+ */
+interface MetaTemplateLifecycleValue {
+  /** Only on message_template_status_update — APPROVED / REJECTED / PAUSED / ... */
+  event?: string
+  message_template_id?: string | number
+  message_template_name?: string
+  message_template_language?: string
+  reason?: string
+  /** Only on message_template_quality_update. */
+  new_quality_score?: string | { score?: string }
+  previous_quality_score?: string | { score?: string }
+}
+
 interface MetaWebhookEntry {
   id: string
-  changes: Array<{ field: string; value: MetaWebhookChangeValue }>
+  /** Unix seconds. Part of the template dedup key — Meta omits it on some deliveries. */
+  time?: number
+  changes: Array<{ field: string; value: MetaWebhookChangeValue | MetaTemplateLifecycleValue }>
 }
 
 export interface MetaWebhookBody {
@@ -107,12 +139,16 @@ interface ChannelRow {
 }
 
 // Meta sends these on a different change.field with a different value
-// shape (template id / waba id, not phone_number_id + messages/statuses).
-// Fase 7 owns the actual handler (writing whatsapp_templates.status_aprovacao
-// / quality_score) — the routing skeleton is kept here so these events
-// don't fall through and get misparsed as messaging changes (harvest
-// matrix area 3: "é grátis incluir o roteamento mesmo sem implementar o
-// handler ainda").
+// shape (template name/language + waba id, not phone_number_id +
+// messages/statuses), so they must never fall through to
+// `processMessagingChange` and get misparsed as messaging changes.
+//
+// ─── Requisito de configuração (fora de banda) ────────────────────
+// Estes três campos NÃO vêm assinados por padrão. No Meta App Dashboard →
+// WhatsApp → Configuration → Webhooks é preciso marcar cada um na mão (não
+// há API para isso em apps Cloud API). Enquanto não estiverem marcados, o
+// status de template só chega pelo sync manual — que continua sendo o único
+// caminho que CRIA linha, porque o webhook não carrega os componentes.
 const TEMPLATE_LIFECYCLE_FIELDS = new Set([
   'message_template_status_update',
   'message_template_quality_update',
@@ -211,18 +247,274 @@ export async function processWebhookBody(
 ): Promise<void> {
   if (!body.entry) return
 
+  // Uma falha em UMA change não derruba as outras — mensagem inbound é dado do
+  // cliente e não se recupera sozinha, então ela precisa ser gravada mesmo que
+  // o evento de template vizinho tenha explodido. Mas engolir a falha e
+  // responder 200 PERDE o evento de vez: a Meta só reentrega em resposta
+  // non-2xx e não existe consumidor de whatsapp_webhook_events com
+  // processed_at IS NULL neste repositório — a linha marcada por
+  // markEventFailed nunca seria retomada. Por isso as falhas transitórias são
+  // COLETADAS e, no fim do lote, viram 503: a redelivery é segura porque o
+  // insert-first dedup pula o que já foi processado com sucesso.
+  const falhasTransitorias: string[] = []
+
   for (const entry of body.entry) {
     for (const change of entry.changes ?? []) {
-      if (TEMPLATE_LIFECYCLE_FIELDS.has(change.field)) {
-        console.info(
-          `[whatsapp-oficial/webhook] template lifecycle event (${change.field}) — ` +
-            'Fase 7 TODO, skipped (routing preserved so it does not fall through as a messaging change).',
+      try {
+        if (TEMPLATE_LIFECYCLE_FIELDS.has(change.field)) {
+          await processTemplateLifecycleChange(
+            entry,
+            change.field,
+            change.value as MetaTemplateLifecycleValue,
+            admin,
+          )
+        } else {
+          await processMessagingChange(change.value as MetaWebhookChangeValue, admin)
+        }
+      } catch (error) {
+        const detalhe = error instanceof Error ? error.message : String(error)
+        falhasTransitorias.push(`${change.field}: ${detalhe}`)
+        console.error(
+          `[whatsapp-oficial/webhook] change (${change.field}) failed; continuing with the ` +
+            'rest of the batch and asking Meta to redeliver at the end:',
+          error,
         )
-        continue
       }
-      await processMessagingChange(change.value, admin)
     }
   }
+
+  // Rejeição de regra de negócio NÃO passa por aqui: template desconhecido
+  // volta { ok: true, atualizado: false } sem lançar, fica registrado e o lote
+  // responde 200 — reentregar não mudaria nada.
+  if (falhasTransitorias.length > 0) {
+    throw new Error(
+      `${falhasTransitorias.length} evento(s) do lote falharam: ${falhasTransitorias.join(' | ')}`,
+    )
+  }
+}
+
+/**
+ * Resolve o canal pelo WABA id que vem em `entry.id` — eventos de template
+ * não trazem `phone_number_id`. Devolve null (em vez de lançar) quando não há
+ * exatamente um canal: sem canal não dá nem para registrar em
+ * `whatsapp_webhook_events` (canal_id é NOT NULL), e forçar redelivery de um
+ * evento que nunca vai resolver só empilharia retry na Meta.
+ */
+async function findChannelByWabaId(
+  wabaId: string,
+  admin: SupabaseClient,
+): Promise<ChannelRow | null> {
+  const { data, error } = await admin
+    .from('whatsapp_channels')
+    .select('id, tenant_id, status')
+    .eq('waba_id', wabaId)
+
+  if (error) {
+    throw new Error(`failed to look up channel for waba_id ${wabaId}: ${error.message}`)
+  }
+  const rows = (data ?? []) as ChannelRow[]
+  if (rows.length === 0) {
+    console.error('[whatsapp-oficial/webhook] no channel configured for waba_id:', wabaId)
+    return null
+  }
+  if (rows.length > 1) {
+    console.error(
+      `[whatsapp-oficial/webhook] ${rows.length} channels matched waba_id ${wabaId}; ` +
+        'skipping the template event to avoid ambiguous tenancy.',
+    )
+    return null
+  }
+  return rows[0]
+}
+
+/**
+ * Aplica um evento de lifecycle de template via
+ * `whatsapp_oficial_registrar_status_template`.
+ *
+ * A RPC NÃO cria linha: o webhook não carrega `components`, então um template
+ * ainda não sincronizado volta `atualizado = false` — isso é informação, não
+ * erro. Nada aqui devolve status != 200 para a Meta.
+ */
+async function processTemplateLifecycleChange(
+  entry: MetaWebhookEntry,
+  field: string,
+  value: MetaTemplateLifecycleValue,
+  admin: SupabaseClient,
+): Promise<void> {
+  const nome = (value.message_template_name ?? '').trim()
+  if (!nome) {
+    console.warn(
+      `[whatsapp-oficial/webhook] ${field} without message_template_name — nothing to match on, skipped.`,
+    )
+    return
+  }
+
+  const wabaId = (entry.id ?? '').trim()
+  if (!wabaId) {
+    console.error(`[whatsapp-oficial/webhook] ${field} without entry.id (waba id), skipped.`)
+    return
+  }
+  const channel = await findChannelByWabaId(wabaId, admin)
+  if (!channel) return
+
+  const idioma = (value.message_template_language ?? '').trim() || null
+  // Cada campo traz UMA das duas informações. `p_status` null faz a RPC
+  // preservar o status atual (é o caso do quality_update), e um score null
+  // preserva o score — nunca zera o que a outra rota gravou.
+  const status =
+    field === 'message_template_status_update' ? (value.event ?? '').trim() || null : null
+  const qualityScore =
+    field === 'message_template_quality_update' ? normalizeQualityScore(value.new_quality_score) : null
+
+  // Dedup composta, mesma lógica de `processStatusEvent`: a Meta reusa nome +
+  // idioma em toda transição do mesmo template, então o discriminante é o
+  // evento em si mais o instante da entrega.
+  //
+  // Só que `entry.time` é OPCIONAL (a Meta o omite em algumas entregas) e sem
+  // ele a chave deixa de ser estável: PAUSED → APPROVED → PAUSED de novo faria
+  // a terceira transição colidir com a primeira e ser descartada como replay,
+  // deixando o template 'aprovado' aqui enquanto está pausado na Meta — e
+  // campanhas continuariam sendo liberadas. Sem instante de entrega não há como
+  // separar replay de transição nova, então escolhemos o erro barato: chave
+  // não-colidente, evento processado. Reaplicar o mesmo status é inofensivo (a
+  // RPC é idempotente); PERDER uma transição não é.
+  const discriminanteEntrega =
+    typeof entry.time === 'number' ? String(entry.time) : `sem-time:${crypto.randomUUID()}`
+  const externalId = `${nome}:${idioma ?? '*'}:${field}:${status ?? qualityScore ?? '-'}:${discriminanteEntrega}`
+
+  const { error: insertEventError } = await admin.from('whatsapp_webhook_events').insert({
+    tenant_id: channel.tenant_id,
+    canal_id: channel.id,
+    event_type: 'template_status',
+    external_id: externalId,
+    payload: { field, value },
+  })
+
+  if (insertEventError) {
+    if (isUniqueViolation(insertEventError)) {
+      console.info(
+        '[whatsapp-oficial/webhook] duplicate template event ignored (idempotent replay):',
+        externalId,
+      )
+      if (!(await shouldResumeExistingEvent(admin, channel.id, 'template_status', externalId))) {
+        return
+      }
+      console.info('[whatsapp-oficial/webhook] resuming failed template event:', externalId)
+    } else {
+      throw new Error(`failed to record template webhook event: ${insertEventError.message}`)
+    }
+  }
+
+  if (channel.status !== 'ativo') {
+    await markEventProcessed(
+      admin,
+      channel.id,
+      'template_status',
+      externalId,
+      'canal inativo/pausado — evento apenas registrado',
+    )
+    return
+  }
+
+  // components_update avisa que a Meta alterou o template, mas não manda os
+  // componentes novos. Gravar meio template seria pior que não gravar nada —
+  // fica registrado e o sync manual traz a versão completa.
+  if (field === 'message_template_components_update') {
+    await markEventProcessed(
+      admin,
+      channel.id,
+      'template_status',
+      externalId,
+      'componentes alterados pela Meta — rode o sync de templates',
+    )
+    return
+  }
+
+  if (!status && !qualityScore) {
+    await markEventProcessed(
+      admin,
+      channel.id,
+      'template_status',
+      externalId,
+      `evento sem status nem quality_score reconhecido: ${field}`,
+    )
+    return
+  }
+
+  // `p_idioma` null é CURINGA na RPC (`v_idioma is null or t.idioma = v_idioma`):
+  // aplicaria o evento em TODAS as variantes de idioma do mesmo nome. Um
+  // status_update APPROVED sem `message_template_language` promoveria junto o
+  // en_US que a Meta rejeitou, e ele passaria a satisfazer o gate
+  // `status_aprovacao <> 'aprovado'` de enfileirar_template/campanha_criar.
+  // Campo faltando não pode AMPLIAR o efeito do evento — o curinga continua
+  // disponível para quem o pedir explicitamente, mas o webhook nunca o
+  // exercita por omissão. Não inventamos idioma padrão: registra e ignora,
+  // igual ao nome ausente. O sync manual reconstrói o catálogo inteiro.
+  if (!idioma) {
+    console.warn(
+      `[whatsapp-oficial/webhook] ${field} sem message_template_language (${nome}) — ignorado ` +
+        'para não aplicar o evento a todos os idiomas do mesmo template.',
+    )
+    await markEventProcessed(
+      admin,
+      channel.id,
+      'template_status',
+      externalId,
+      `evento sem message_template_language — ignorado (curinga de idioma nao e aplicado por omissao): ${field}`,
+    )
+    return
+  }
+
+  const { data: rpcResult, error: rpcError } = await admin.rpc(
+    'whatsapp_oficial_registrar_status_template',
+    {
+      p_tenant_id: channel.tenant_id,
+      p_canal_id: channel.id,
+      p_nome: nome,
+      p_idioma: idioma,
+      p_status: status,
+      p_motivo: (value.reason ?? '').trim() || null,
+      p_quality_score: qualityScore,
+    },
+  )
+
+  if (rpcError) {
+    console.error(
+      '[whatsapp-oficial/webhook] whatsapp_oficial_registrar_status_template RPC failed:',
+      rpcError.message,
+    )
+    await markEventFailed(admin, channel.id, 'template_status', externalId, rpcError.message)
+    throw new Error(`whatsapp_oficial_registrar_status_template failed: ${rpcError.message}`)
+  }
+
+  const result = rpcResult as { ok: boolean; atualizado?: boolean; reason?: string }
+  if (!result?.ok) {
+    await markEventProcessed(
+      admin,
+      channel.id,
+      'template_status',
+      externalId,
+      result?.reason ?? 'rejeitado',
+    )
+    return
+  }
+  if (result.atualizado !== true) {
+    // Template ainda não sincronizado — esperado, não é erro.
+    console.info(
+      `[whatsapp-oficial/webhook] ${field} for a template not yet synced (${nome}/${idioma ?? '*'}):`,
+      result.reason ?? 'template_desconhecido',
+    )
+    await markEventProcessed(
+      admin,
+      channel.id,
+      'template_status',
+      externalId,
+      result.reason ?? 'template_desconhecido',
+    )
+    return
+  }
+
+  await markEventProcessed(admin, channel.id, 'template_status', externalId, null)
 }
 
 async function processMessagingChange(

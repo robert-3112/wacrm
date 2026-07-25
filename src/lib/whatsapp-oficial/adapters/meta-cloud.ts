@@ -34,7 +34,20 @@ function asMediaKind(value: unknown): MediaKind | undefined {
   return typeof value === 'string' && MEDIA_KINDS.has(value) ? (value as MediaKind) : undefined
 }
 
-function isTemplateJob(job: OutboxJob): boolean {
+/**
+ * Whether this job will be sent to Meta as an approved template.
+ *
+ * EXPORTED on purpose: the outbox worker needs the exact same predicate for
+ * the 24h free-form window barrier. It used to test `job.tipo !== 'template'`
+ * on its own, which diverged from this function — a campaign job (`tipo =
+ * 'broadcast'`) carrying a `template_name` was dead-lettered as
+ * `fora_da_janela_24h` before ever reaching the adapter, even though a
+ * template is precisely what Meta allows outside the window. Campaign jobs
+ * must stay `tipo = 'broadcast'` so the claim RPC keeps them behind the
+ * broadcast kill switch, so the barrier is what had to change. One
+ * predicate, one source of truth.
+ */
+export function isTemplateJob(job: OutboxJob): boolean {
   return job.tipo === 'template' || asString(job.payload.template_name) !== undefined
 }
 

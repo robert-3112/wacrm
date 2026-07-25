@@ -27,6 +27,17 @@ const META_API_VERSION =
   configuredVersion && /^v\d+\.\d+$/.test(configuredVersion) ? configuredVersion : 'v24.0'
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
 
+/**
+ * Base da Graph API resolvida (versão configurável por `META_GRAPH_API_VERSION`).
+ *
+ * EXPORTADA para que o sync de templates (`./meta-templates.ts`) e a rota legada do WACRM usem
+ * exatamente a mesma versão. A rota legada tinha `v21.0` cravado no código enquanto este módulo
+ * já estava em v24.0 — dois clientes da mesma API em versões diferentes no mesmo deploy.
+ */
+export function metaApiBase(): string {
+  return META_API_BASE
+}
+
 export interface MetaSendResult {
   messageId: string
 }
