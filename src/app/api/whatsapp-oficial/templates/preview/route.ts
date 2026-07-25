@@ -168,12 +168,14 @@ function resolverVariaveis(raw: unknown, componentes: MetaTemplateComponentRaw[]
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    // Autenticar ANTES de validar o corpo, igual às rotas de campanha: quem não tem sessão não
+    // deve descobrir o vocabulário do payload pela mensagem de erro.
+    const { userId, supabaseUser } = await requireGestaoSession()
+
     const body = (await request.json().catch(() => null)) as PreviewBody | null
     const templateId = typeof body?.templateId === 'string' ? body.templateId.trim() : ''
     if (!templateId) throw new BadRequestError('templateId is required')
     const valores = parseValores(body?.valores)
-
-    const { userId, supabaseUser } = await requireGestaoSession()
 
     // Orçamento `campanhaWrite` (20/min), não `templateSync` (6/min): sync é
     // caro para TERCEIROS (queima a cota do WABA), então merece o orçamento

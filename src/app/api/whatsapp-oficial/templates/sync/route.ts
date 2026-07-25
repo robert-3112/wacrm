@@ -95,11 +95,13 @@ function statusParaReason(reason: string | undefined): number {
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    // Autenticar ANTES de validar o corpo, igual às rotas de campanha: quem não tem sessão não
+    // deve descobrir o vocabulário do payload pela mensagem de erro.
+    const { userId, supabaseUser, admin } = await requireGestaoSession()
+
     const body = (await request.json().catch(() => null)) as SyncBody | null
     const canalId = typeof body?.canalId === 'string' ? body.canalId.trim() : ''
     if (!canalId) throw new BadRequestError('canalId is required')
-
-    const { userId, supabaseUser, admin } = await requireGestaoSession()
 
     // Antes de qualquer I/O caro: um sync pode disparar 20 requisições à Meta,
     // e a Business Management API tem cota POR WABA — um loop travado aqui

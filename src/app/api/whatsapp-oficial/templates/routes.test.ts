@@ -202,11 +202,26 @@ describe('POST /api/whatsapp-oficial/templates/sync', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('exige canalId antes de qualquer I/O (400)', async () => {
+  it('exige canalId, mas só depois de autenticar (400 para quem tem sessão)', async () => {
+    mocks.requireGestaoSession.mockResolvedValue(gestaoComCanalVisivel(makeSyncAdmin()))
+
     const res = await sincronizarTemplates(postRequest('/sync', {}))
 
     expect(res.status).toBe(400)
-    expect(mocks.requireGestaoSession).not.toHaveBeenCalled()
+    // A validação do corpo NÃO pode vir antes do gate de sessão: sem isso, quem não está
+    // logado aprende o vocabulário do payload pela mensagem de erro. Mesma ordem das rotas
+    // de campanha. O 400 continua barrando antes de qualquer I/O caro.
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sem sessão responde 401 sem revelar o formato do corpo', async () => {
+    mocks.requireGestaoSession.mockRejectedValue(new UnauthorizedError())
+
+    const res = await sincronizarTemplates(postRequest('/sync', {}))
+    const body = await res.json()
+
+    expect(res.status).toBe(401)
+    expect(JSON.stringify(body)).not.toContain('canalId')
   })
 
   it('corta em 429 quando estoura o orçamento de sync', async () => {
