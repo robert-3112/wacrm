@@ -1,146 +1,116 @@
-// ============================================================
-// POST /api/v1/messages — send a WhatsApp message via the public API.
-//
-// The headline public endpoint (issue #245). Unlike the dashboard's
-// `/api/whatsapp/send` (which takes an internal `conversation_id`),
-// this takes a phone number — what an external automation actually
-// has — resolves-or-creates the contact + conversation, then runs the
-// same shared send core.
-//
-// Auth: API key with the `messages:send` scope. Account context (and
-// the service-role client) come from `requireApiKey`.
-//
-// Body:
-//   {
-//     "to": "+14155550123",                 // required, E.164
-//     "type": "text",                        // text|template|image|video|document|audio (default: text)
-//     "text": "Hello!",                      // text body, or media caption
-//     "media_url": "https://…/file.pdf",     // required for image/video/document/audio
-//     "filename": "invoice.pdf",             // optional, document filename
-//     "template": {                          // required when type=template
-//       "name": "order_update",
-//       "language": "en_US",
-//       "params": ["A123"] | { "body": [...] }   // array = positional body; object = structured
-//     },
-//     "reply_to_message_id": "<uuid>",       // optional, must be in the same conversation
-//     "name": "Jane Doe"                     // optional, names a newly-created contact
-//   }
-//
-// Response (201):
-//   { "data": { "message_id", "whatsapp_message_id", "conversation_id",
-//               "contact_id", "contact_created" } }
-// ============================================================
+/**
+ * POST /api/v1/messages — enfileira uma mensagem de texto (escopo `messages:send`).
+ *
+ * ⚠️ Substituiu a rota do fork WACRM neste caminho. A antiga aceitava um telefone, criava
+ * contato/conversa e chamava `sendMessageToConversation`, que ENTREGA de verdade na Meta —
+ * sobre tabelas (`contacts`, `conversations`, `accounts`) que não existem no Supabase da SUNT.
+ * Ver o relatório da Sessão 3.
+ *
+ * ── O problema do ator, e como foi resolvido ─────────────────────────────────────────────
+ * `whatsapp_oficial_enfileirar_mensagem` exige `p_actor_user_id` e o valida contra
+ * `app_roles`/`corretores`. Uma chave de API não é um usuário do `auth.users`, então não havia
+ * uuid honesto para passar ali. As duas saídas fáceis são ruins:
+ *   • inventar um uuid → a RPC recusa com 'sem_permissao';
+ *   • reusar `whatsapp_api_keys.criado_por` → a mensagem ficaria assinada por uma pessoa que
+ *     não a escreveu, e a integração quebraria no dia em que essa pessoa perdesse o papel de
+ *     gestão ou saísse da empresa, por um motivo impossível de adivinhar lendo o erro.
+ * Então o ator-máquina ganhou caminho próprio no banco:
+ * `whatsapp_oficial_enfileirar_mensagem_api(p_conversation_id, p_content, p_api_key_id)`
+ * (migration `20260726100000_whatsapp_api_v1.sql`), que autoriza pela própria chave — não
+ * revogada, não expirada, com escopo `messages:send` e do MESMO tenant da conversa — e grava
+ * `enviado_por = null` com `api_key_id` preenchido, que é a convenção que
+ * `whatsapp_oficial_campanha_enfileirar_lote` já usava para mensagem de máquina.
+ *
+ * ── "enfileirado", não "enviado" ─────────────────────────────────────────────────────────
+ * A resposta diz `enfileirado: true` porque é literalmente o que aconteceu: a linha entrou em
+ * `whatsapp_outbox` com status `pendente`. Quem entrega é o worker da outbox, que hoje roda em
+ * shadow. Responder "enviado" seria mentira e faria o integrador contar como entregue algo que
+ * nunca saiu.
+ */
 
-import { requireApiKey } from '@/lib/auth/api-context';
-import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
-import { resolveConversationByPhone } from '@/lib/whatsapp/resolve-conversation';
 import {
-  sendMessageToConversation,
-  validateSendMessageParams,
-  SendMessageError,
-} from '@/lib/whatsapp/send-message';
-import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive';
+  requireApiKeyWithScope,
+  apiV1Ok,
+  apiV1BadRequest,
+  apiV1NotFound,
+  ApiV1Error,
+  toApiV1Response,
+} from '@/lib/whatsapp-oficial/api-key-auth'
+import { isUuid } from '../serialize'
 
-export async function POST(request: Request) {
+const MAX_CONTENT_LENGTH = 4096
+
+/** Motivos que significam "a porta está fechada agora", não "seu pedido está malformado". */
+const CONFLITO = new Set(['lead_optout_ou_inativo', 'canal_inativo', 'conversa_encerrada'])
+
+interface Corpo {
+  conversationId?: unknown
+  content?: unknown
+}
+
+export async function POST(request: Request): Promise<Response> {
   try {
-    const ctx = await requireApiKey(request, 'messages:send');
+    const ctx = await requireApiKeyWithScope(request, 'messages:send')
 
-    const body = (await request.json().catch(() => null)) as Record<
-      string,
-      unknown
-    > | null;
-    if (!body || typeof body !== 'object') {
-      return fail('bad_request', 'Request body must be a JSON object', 400);
+    const body = (await request.json().catch(() => null)) as Corpo | null
+    const conversationId = typeof body?.conversationId === 'string' ? body.conversationId : ''
+    const content = typeof body?.content === 'string' ? body.content.trim() : ''
+
+    if (!conversationId) throw apiV1BadRequest("'conversationId' is required")
+    if (!isUuid(conversationId)) throw apiV1BadRequest("'conversationId' must be a UUID")
+    if (!content) throw apiV1BadRequest("'content' is required")
+    if (content.length > MAX_CONTENT_LENGTH) {
+      throw apiV1BadRequest(`'content' exceeds ${MAX_CONTENT_LENGTH} characters`)
     }
 
-    const to = typeof body.to === 'string' ? body.to.trim() : '';
-    if (!to) {
-      return fail('bad_request', "'to' is required", 400);
-    }
+    const { data, error } = await ctx.admin.rpc('whatsapp_oficial_enfileirar_mensagem_api', {
+      p_conversation_id: conversationId,
+      p_content: content,
+      p_api_key_id: ctx.apiKeyId,
+    })
 
-    const type = typeof body.type === 'string' ? body.type : 'text';
-
-    // Unpack the optional `template` object into the flat params the
-    // send core expects. `params` as an array → legacy positional body
-    // params; as an object → structured header/body/button params.
-    const template =
-      body.template && typeof body.template === 'object'
-        ? (body.template as Record<string, unknown>)
-        : null;
-    const templateParams = Array.isArray(template?.params)
-      ? (template.params as unknown[]).filter(
-          (p): p is string => typeof p === 'string'
-        )
-      : undefined;
-    const templateMessageParams =
-      template?.params && !Array.isArray(template.params)
-        ? template.params
-        : undefined;
-
-    // Validate the message shape BEFORE resolveConversationByPhone
-    // finds-or-creates a contact + conversation, so a bad payload 400s
-    // without leaving an orphan contact/conversation behind.
-    // Validated by `validateSendMessageParams` below; the cast just bridges
-    // the untyped JSON body to the send-core param type.
-    const interactivePayload =
-      body.interactive_payload && typeof body.interactive_payload === 'object'
-        ? (body.interactive_payload as InteractiveMessagePayload)
-        : null;
-
-    validateSendMessageParams({
-      messageType: type,
-      contentText: typeof body.text === 'string' ? body.text : null,
-      mediaUrl: typeof body.media_url === 'string' ? body.media_url : null,
-      templateName: typeof template?.name === 'string' ? template.name : null,
-      interactivePayload,
-    });
-
-    // Find-or-create the conversation for this phone, then send. Both
-    // steps share `SendMessageError`, so one catch maps the whole
-    // pipeline to the envelope.
-    const resolved = await resolveConversationByPhone(
-      ctx.supabase,
-      ctx.accountId,
-      to,
-      typeof body.name === 'string' ? body.name : null
-    );
-
-    const result = await sendMessageToConversation(
-      ctx.supabase,
-      ctx.accountId,
-      {
-        conversationId: resolved.conversationId,
-        messageType: type,
-        contentText: typeof body.text === 'string' ? body.text : null,
-        mediaUrl: typeof body.media_url === 'string' ? body.media_url : null,
-        filename: typeof body.filename === 'string' ? body.filename : null,
-        templateName: typeof template?.name === 'string' ? template.name : null,
-        templateLanguage:
-          typeof template?.language === 'string' ? template.language : null,
-        templateParams,
-        templateMessageParams,
-        interactivePayload,
-        replyToMessageId:
-          typeof body.reply_to_message_id === 'string'
-            ? body.reply_to_message_id
-            : null,
+    if (error) {
+      // A RPC levanta 42501 quando a chave foi revogada/expirou/perdeu escopo entre a
+      // autenticação e agora. Ela é a autoridade; aqui só se repassa.
+      const codigo = (error as { code?: string }).code
+      if (codigo === '42501') {
+        throw new ApiV1Error('unauthorized', 401, { message: 'Missing or invalid API key' })
       }
-    );
-
-    return ok(
-      {
-        message_id: result.messageId,
-        whatsapp_message_id: result.whatsappMessageId,
-        conversation_id: resolved.conversationId,
-        contact_id: resolved.contactId,
-        contact_created: resolved.contactCreated,
-      },
-      201
-    );
-  } catch (err) {
-    if (err instanceof SendMessageError) {
-      return fail(err.code, err.message, err.status);
+      console.error('[api/v1/messages] RPC de enfileiramento falhou:', error.message)
+      throw new Error(error.message)
     }
-    return toApiErrorResponse(err);
+
+    const resultado = (data ?? {}) as {
+      ok?: boolean
+      reason?: string
+      message?: Record<string, unknown>
+    }
+
+    if (resultado.ok !== true || !resultado.message) {
+      const reason = resultado.reason ?? 'message_enqueue_rejected'
+      // Conversa de outro tenant volta como 'conversa_nao_encontrada' — mesmo 404 de uma
+      // conversa inexistente, para não virar oráculo de ids alheios.
+      if (reason === 'conversa_nao_encontrada') throw apiV1NotFound('Conversation not found')
+      throw new ApiV1Error(reason, CONFLITO.has(reason) ? 409 : 422)
+    }
+
+    const mensagem = resultado.message
+    return apiV1Ok(
+      {
+        enfileirado: true,
+        message: {
+          id: mensagem.id,
+          conversation_id: mensagem.conversation_id,
+          direction: mensagem.direction,
+          type: mensagem.message_type,
+          content: mensagem.content,
+          status: mensagem.status,
+          created_at: mensagem.created_at,
+        },
+      },
+      201,
+    )
+  } catch (error) {
+    return toApiV1Response(error)
   }
 }

@@ -1,65 +1,77 @@
-// ============================================================
-// GET /api/v1/conversations/{id}/messages — list a conversation's
-// messages (scope: messages:read), newest first, keyset-paginated.
-//
-// The conversation is verified to belong to the key's account before
-// any message is returned — a foreign or unknown id → 404.
-// ============================================================
+/**
+ * GET /api/v1/conversations/{id}/messages — mensagens de uma conversa (escopo `messages:read`),
+ * em ordem cronológica reversa (mais nova primeiro), paginadas por cursor.
+ *
+ * ⚠️ Substituiu a rota do fork WACRM neste caminho, que lia `conversations`/`messages` por
+ * `account_id` — tabelas ausentes no Supabase da SUNT. Ver o relatório da Sessão 3.
+ *
+ * O dono da conversa é conferido ANTES de qualquer mensagem sair: id de outro tenant e id
+ * inexistente devolvem o mesmo 404. Fosse 403 no primeiro caso, a diferença entre as duas
+ * respostas seria um oráculo para enumerar conversas alheias.
+ *
+ * Note que o filtro por tenant é aplicado DUAS vezes — na conversa e de novo nas mensagens.
+ * Não é redundância à toa: `whatsapp_messages` carrega o próprio `tenant_id`, e amarrar os dois
+ * significa que nem um `conversation_id` que por algum acidente tenha mensagens de outro tenant
+ * atravessa daqui.
+ */
 
-import { requireApiKey } from '@/lib/auth/api-context';
-import { okList, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import {
-  parseListParams,
-  keysetFilter,
-  buildPage,
-} from '@/lib/api/v1/pagination';
-import { serializeMessage } from '@/lib/api/v1/conversations';
-import type { Message } from '@/types';
+  requireApiKeyWithScope,
+  apiV1Page,
+  apiV1NotFound,
+  apiV1BadRequest,
+  toApiV1Response,
+} from '@/lib/whatsapp-oficial/api-key-auth'
+import { parseListParams, keysetFilter, buildPage } from '@/lib/api/v1/pagination'
+import { API_MESSAGE_SELECT, isUuid, serializeMessage, type RawMessageRow } from '../../../serialize'
 
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+  { params }: { params: Promise<{ id: string }> },
+): Promise<Response> {
   try {
-    const ctx = await requireApiKey(request, 'messages:read');
-    const { id } = await params;
-    const { limit, cursor } = parseListParams(request);
+    const ctx = await requireApiKeyWithScope(request, 'messages:read')
+    const { id } = await params
 
-    // Gate on account ownership of the conversation first.
-    const { data: conv } = await ctx.supabase
-      .from('conversations')
+    // Um id fora do formato faria o PostgREST devolver 22P02; 400 explícito é mais honesto.
+    if (!isUuid(id)) throw apiV1BadRequest('conversation id must be a UUID')
+
+    const { data: conversa, error: convError } = await ctx.admin
+      .from('whatsapp_conversations')
       .select('id')
       .eq('id', id)
-      .eq('account_id', ctx.accountId)
-      .maybeSingle();
-    if (!conv) return fail('not_found', 'Conversation not found', 404);
+      .eq('tenant_id', ctx.tenantId)
+      .maybeSingle()
 
-    let query = ctx.supabase
-      .from('messages')
-      .select('*')
+    if (convError) {
+      console.error('[api/v1/conversations/messages] falha ao checar a conversa:', convError.message)
+      throw new Error(convError.message)
+    }
+    if (!conversa) throw apiV1NotFound('Conversation not found')
+
+    const { limit, cursor } = parseListParams(request)
+
+    let query = ctx.admin
+      .from('whatsapp_messages')
+      .select(API_MESSAGE_SELECT)
+      .eq('tenant_id', ctx.tenantId)
       .eq('conversation_id', id)
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
-      .limit(limit + 1);
+      .limit(limit + 1)
 
-    const kf = keysetFilter(cursor);
-    if (kf) query = query.or(kf);
+    const kf = keysetFilter(cursor)
+    if (kf) query = query.or(kf)
 
-    const { data, error } = await query;
+    const { data, error } = await query
     if (error) {
-      console.error('[api/v1/messages] list error:', error);
-      return fail('internal', 'Failed to list messages', 500);
+      console.error('[api/v1/conversations/messages] falha ao listar:', error.message)
+      throw new Error(error.message)
     }
 
-    const { items, nextCursor } = buildPage(
-      (data ?? []) as Array<{ created_at: string; id: string }>,
-      limit
-    );
-    return okList(
-      items.map((m) => serializeMessage(m as unknown as Message)),
-      nextCursor
-    );
-  } catch (err) {
-    return toApiErrorResponse(err);
+    const { items, nextCursor } = buildPage((data ?? []) as unknown as RawMessageRow[], limit)
+    return apiV1Page(items.map(serializeMessage), nextCursor)
+  } catch (error) {
+    return toApiV1Response(error)
   }
 }
