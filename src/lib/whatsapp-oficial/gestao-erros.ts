@@ -69,6 +69,17 @@ const MENSAGENS: Record<string, string> = {
   variaveis_insuficientes: 'Faltam valores para as variáveis exigidas pelo template.',
   valores_demais: 'Você informou mais valores do que o template aceita.',
   valor_muito_longo: 'Um dos valores passa do tamanho máximo aceito.',
+  variaveis_padrao_invalida:
+    'Os valores das variáveis não estão no formato que o envio lê (objeto com body/headerText/headerMediaUrl/buttonParams).',
+  midia_cabecalho_obrigatoria:
+    'Este template tem cabeçalho de mídia e não traz mídia de exemplo: informe a URL do arquivo.',
+  // Cobre os DOIS casos que o banco devolve neste slug: bloco fora da lista (CAROUSEL,
+  // LIMITED_TIME_OFFER) e FORMATO de cabeçalho fora dela, que chega como
+  // `componente: 'HEADER/LOCATION'`. Não há valor que conserte nenhum dos dois — por isso a
+  // frase não pede nada ao operador.
+  template_componente_nao_suportado:
+    'Este template tem um bloco, ou um formato de cabeçalho, que o envio não sabe montar (CAROUSEL ou cabeçalho LOCATION, por exemplo). Enviar assim entregaria a mensagem mutilada ou faria a Meta recusá-la.',
+  template_nao_encontrado: 'Template não encontrado (ou invisível para o seu usuário).',
 
   // -- conversa / lead ------------------------------------------------------
   conversa_nao_encontrada: 'Conversa não encontrada (ou invisível para o seu usuário).',

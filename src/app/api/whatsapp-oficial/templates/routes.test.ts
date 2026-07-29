@@ -493,6 +493,16 @@ const LINHA_TEMPLATE = {
   variaveis: { cabecalho: [], corpo: [1], botoes: [] },
   motivo_rejeicao: null,
   sincronizado_em: '2026-07-25T12:00:00Z',
+  componentes: [{ type: 'BODY', text: 'Olá {{1}}!' }],
+}
+
+/** O que a rota DEVOLVE: o blob `componentes` continua fora da resposta, e no
+ *  lugar dele vão os dois fatos que a tela de campanha precisa destilar dele. */
+const { componentes: _blob, ...LINHA_SEM_BLOB } = LINHA_TEMPLATE
+const LINHA_TEMPLATE_RESPOSTA = {
+  ...LINHA_SEM_BLOB,
+  tipos_componentes: ['BODY'],
+  cabecalho_midia_exemplo: false,
 }
 
 describe('GET /api/whatsapp-oficial/templates', () => {
@@ -522,7 +532,10 @@ describe('GET /api/whatsapp-oficial/templates', () => {
     const json = await res.json()
 
     expect(res.status).toBe(200)
-    expect(json.templates).toEqual([LINHA_TEMPLATE])
+    expect(json.templates).toEqual([LINHA_TEMPLATE_RESPOSTA])
+    // O blob não pode voltar a vazar para o cliente: ele é grande e a listagem
+    // traz o catálogo inteiro do canal.
+    expect(json.templates[0]).not.toHaveProperty('componentes')
     expect(supabaseUser.from).toHaveBeenCalledWith('whatsapp_templates')
     // A RLS é o gate desta rota: um select com service_role devolveria o
     // catálogo de outros tenants sem checagem nenhuma.

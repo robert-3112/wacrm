@@ -24,6 +24,7 @@ import type {
   GerarDestinatariosResultado,
   TemplatePreviewResposta,
   TemplateSyncResultado,
+  VariaveisPadrao,
   WhatsAppTemplate,
 } from '@/types/whatsapp-oficial'
 
@@ -240,6 +241,9 @@ export interface FormularioCampanha {
   janelaInicio?: string
   janelaFim?: string
   janelaDias?: number[]
+  /** Já na FORMA DE ENVIO (`SendTimeParams`), montada por
+   *  `montarVariaveisPadrao` — não é o vocabulário do preview. */
+  variaveisPadrao?: VariaveisPadrao
   segmentacao?: {
     etapas?: string[]
     temperaturas?: string[]
@@ -309,6 +313,16 @@ export function montarConfigCampanha(form: FormularioCampanha): Record<string, u
     const limpo = bruto.map((v) => String(v).trim()).filter(Boolean)
     if (limpo.length > 0) seg[chaveConfig] = limpo
   }
+  // `variaveis_padrao` segue a mesma lei do resto do módulo — chave só sai
+  // quando tem conteúdo —, mas por um motivo DIFERENTE do de `bases_legais`.
+  // Lá, `[]` é uma bomba (suprime todo mundo). Aqui, `{}` é literalmente o
+  // default da coluna (`jsonb not null default '{}'`), então mandar `{}` não
+  // muda nada: é só ruído no jsonb gravado. Omitir é o certo porque template
+  // estático — `hello_world` não tem uma variável sequer — legitimamente não
+  // exige nada, e o banco não pode ficar mais rígido que a Meta.
+  const variaveis = form.variaveisPadrao
+  if (variaveis && Object.keys(variaveis).length > 0) config.variaveis_padrao = variaveis
+
   // `sem_corretor: false` é o default da RPC — mandar explicitamente só
   // acrescenta ruído ao jsonb gravado.
   if (form.segmentacao?.semCorretor === true) seg.sem_corretor = true

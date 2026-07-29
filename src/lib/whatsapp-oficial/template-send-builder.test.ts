@@ -100,6 +100,33 @@ describe('buildSendComponents contra os formatos REAIS da Meta', () => {
     expect(() => buildSendComponents(futuro)).toThrow(/LIMITED_TIME_OFFER/)
   })
 
+  it('recusa FORMATO de cabeçalho fora da lista em vez de mandá-lo como documento', () => {
+    // LOCATION é formato real da Cloud API. O parâmetro de mídia era escolhido por
+    // eliminação (`IMAGE ? image : VIDEO ? video : document`), então este header saía como
+    // `{type:'document', document:{link}}` e a Meta recusava — em rajada, numa campanha.
+    const location = [
+      { type: 'HEADER', format: 'LOCATION' as unknown as 'IMAGE' },
+      { type: 'BODY', text: 'Te espero lá' },
+    ] as MetaTemplateComponent[]
+
+    expect(() => buildSendComponents(location)).toThrow(TemplateBuildError)
+    expect(() => buildSendComponents(location)).toThrow(/LOCATION/)
+    // Nem com link: não há valor que conserte um formato que o builder não sabe montar.
+    expect(() =>
+      buildSendComponents(location, { headerMediaUrl: 'https://cdn.test/x.png' }),
+    ).toThrow(/LOCATION/)
+  })
+
+  it('o formato do cabeçalho é normalizado antes de decidir (minúscula e espaço)', () => {
+    const minusculo = [
+      { type: 'HEADER', format: 'image' as unknown as 'IMAGE' },
+      { type: 'BODY', text: 'oi' },
+    ] as MetaTemplateComponent[]
+    expect(buildSendComponents(minusculo, { headerMediaUrl: 'https://cdn.test/x.png' })).toEqual([
+      { type: 'header', parameters: [{ type: 'image', image: { link: 'https://cdn.test/x.png' } }] },
+    ])
+  })
+
   it('recusa componentes malformados (não-array vindo do jsonb)', () => {
     expect(() => buildSendComponents(null as unknown as MetaTemplateComponent[])).toThrow(
       TemplateBuildError,
@@ -127,6 +154,41 @@ describe('buildSendComponents contra os formatos REAIS da Meta', () => {
     expect(() => buildSendComponents(REAIS.order_confirmation)).toThrow(
       /Body has 3 variable\(s\) but only 0 value\(s\)/,
     )
+  })
+
+  /**
+   * `params` também vem do jsonb (`payload.messageParams`), e o único portão até aqui é o
+   * `isRecord` do adapter — que ACEITA array e não olha uma única chave. Forma errada
+   * precisa virar TemplateBuildError (permanente) e não TypeError: um TypeError não tem
+   * `httpStatus`, cai em `unknown_error_default_retryable` e ressuscita o exato cenário que
+   * o 422 foi criado para matar — 5 tentativas com backoff de até 6h POR destinatário.
+   */
+  it.each([
+    { caso: 'string com length igual ao nº de variáveis', body: 'Ana' as unknown },
+    { caso: 'número', body: 42 as unknown },
+    { caso: 'objeto', body: {} as unknown },
+  ])('recusa messageParams.body $caso como PERMANENTE, não como TypeError', ({ body }) => {
+    const chamar = () =>
+      buildSendComponents(REAIS.order_confirmation, { body } as { body?: string[] })
+    expect(chamar).toThrow(TemplateBuildError)
+    expect(chamar).toThrow(/must be an array of strings/)
+  })
+
+  it('recusa item não-string no body — String(null) entregaria a palavra "null" ao cliente', () => {
+    expect(() =>
+      buildSendComponents(REAIS.order_confirmation, {
+        body: ['Ana', null, '10h'] as unknown as string[],
+      }),
+    ).toThrow(/body\[1\] must be a string/)
+  })
+
+  it('recusa buttonParams que não seja objeto indexado por posição', () => {
+    expect(() =>
+      buildSendComponents(REAIS.order_confirmation, {
+        body: ['a', 'b', 'c'],
+        buttonParams: ['promo'] as unknown as Record<number, string>,
+      }),
+    ).toThrow(/buttonParams must be an object/)
   })
 })
 

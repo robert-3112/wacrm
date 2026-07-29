@@ -6,6 +6,16 @@ import {
   checkRateLimit,
   rateLimitResponse,
 } from '@/lib/whatsapp-oficial/rate-limit'
+import {
+  faltandoNaCampanha,
+  motivoTemplateNaoSuportado,
+  resumirComponentes,
+} from '@/lib/whatsapp-oficial/template-campos'
+import type {
+  CampanhaExigenciasTemplate,
+  TemplateVariaveis,
+  VariaveisPadrao,
+} from '@/types/whatsapp-oficial'
 
 /**
  * Detalhe de uma campanha + agregado dos destinatários.
@@ -140,6 +150,75 @@ async function agregarDestinatarios(
   return { total, truncado, por_status: porStatus, por_motivo_supressao: porMotivo }
 }
 
+interface TemplateDaCampanhaRow {
+  id: string
+  nome: string | null
+  variaveis: TemplateVariaveis | null
+  cabecalho_formato: string | null
+  cabecalho_texto: string | null
+  corpo_texto: string | null
+  componentes: unknown
+}
+
+/**
+ * O que o template da campanha ainda exige — resolvido AQUI, no servidor, e não
+ * na tela.
+ *
+ * A tela de detalhe não tem o catálogo em mãos (ela abre por id de campanha,
+ * vinda de qualquer lugar), e a pergunta que ela precisa responder é a mais
+ * cara de errar do fluxo: `variaveis_padrao` é WRITE-ONCE e é copiado para cada
+ * destinatário na materialização, então aprovar uma campanha com valor faltando
+ * é aprovar um envio que morre com 422 PERMANENTE no primeiro disparo, sem
+ * conserto que não seja cancelar e recriar.
+ *
+ * A leitura usa o MESMO cliente com sessão do resto da rota: `whatsapp_templates`
+ * só tem policy de SELECT para gestão, e ler o template com `service_role` aqui
+ * seria o único ponto do arquivo capaz de vazar catálogo de outro tenant.
+ */
+async function resolverExigencias(
+  client: SupabaseClient,
+  templateId: string | null,
+  variaveisPadrao: VariaveisPadrao | null,
+): Promise<CampanhaExigenciasTemplate | null> {
+  if (!templateId) return null
+
+  const { data, error } = await client
+    .from('whatsapp_templates')
+    .select('id, nome, variaveis, cabecalho_formato, cabecalho_texto, corpo_texto, componentes')
+    .eq('id', templateId)
+    .maybeSingle()
+
+  if (error) throw error
+  // Template sumiu do catálogo (ou a RLS o esconde): não dá para afirmar que
+  // falta algo, e inventar um veredito seria pior que não ter nenhum.
+  if (!data) return null
+
+  const template = data as unknown as TemplateDaCampanhaRow
+  const resumo = resumirComponentes(template.componentes)
+
+  return {
+    templateId: template.id,
+    nome: template.nome ?? '',
+    faltando: faltandoNaCampanha(
+      {
+        variaveis: template.variaveis,
+        cabecalho_formato: template.cabecalho_formato,
+        cabecalho_texto: template.cabecalho_texto,
+        corpo_texto: template.corpo_texto,
+        cabecalho_midia_exemplo: resumo.cabecalhoMidiaExemplo,
+      },
+      variaveisPadrao,
+    ),
+    // O FORMATO do cabeçalho entra junto: olhar só os tipos de bloco deixava passar
+    // `HEADER/LOCATION`, para o qual esta rota devolveria `faltando: []` e a tela liberaria o
+    // botão Aprovar que o banco recusa — exatamente o aviso que este endpoint existe para dar.
+    naoSuportado: motivoTemplateNaoSuportado({
+      tipos_componentes: resumo.tipos,
+      cabecalho_formato: template.cabecalho_formato,
+    }),
+  }
+}
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -169,7 +248,17 @@ export async function GET(
 
     const destinatarios = await agregarDestinatarios(supabaseUser, id)
 
-    return NextResponse.json({ ok: true, campanha, destinatarios })
+    const linha = campanha as unknown as {
+      template_id: string | null
+      variaveis_padrao: VariaveisPadrao | null
+    }
+    const exigencias = await resolverExigencias(
+      supabaseUser,
+      linha.template_id,
+      linha.variaveis_padrao,
+    )
+
+    return NextResponse.json({ ok: true, campanha, destinatarios, exigencias })
   } catch (error) {
     return toErrorResponse(error)
   }

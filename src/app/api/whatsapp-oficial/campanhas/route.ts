@@ -5,6 +5,7 @@ import {
   checkRateLimit,
   rateLimitResponse,
 } from '@/lib/whatsapp-oficial/rate-limit'
+import { validarVariaveisPadrao } from '@/lib/whatsapp-oficial/template-campos'
 
 /**
  * Campanhas (broadcasts) do canal oficial — listar e criar.
@@ -240,6 +241,17 @@ export async function POST(request: Request): Promise<Response> {
     ) {
       return unprocessable('politica_handoff_invalida')
     }
+
+    // `variaveis_padrao` é WRITE-ONCE (não há RPC de edição de campanha nem
+    // policy de UPDATE em `whatsapp_broadcasts`) e é copiado para CADA
+    // destinatário na materialização. Forma errada aqui não erra em lugar
+    // nenhum: a RPC faz um `coalesce` cru da chave, o adapter faz um cast, e o
+    // defeito só aparece job a job no worker — depois de já existirem as linhas
+    // de recipients, messages e outbox. Esta rota confere a FORMA e o TETO; o
+    // mínimo ("faltou valor") é do banco, que é a única autoridade que
+    // sobrevive a uma UI trocada.
+    const recusa = validarVariaveisPadrao(config.variaveis_padrao)
+    if (recusa) return unprocessable(recusa.slug, recusa.extra)
 
     const { data, error } = await admin.rpc('whatsapp_oficial_campanha_criar', {
       p_actor_user_id: userId,

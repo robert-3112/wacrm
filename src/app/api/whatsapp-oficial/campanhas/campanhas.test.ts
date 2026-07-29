@@ -329,6 +329,94 @@ describe('POST /api/whatsapp-oficial/campanhas', () => {
     expect((await res.json()).error).toBe('janela_incompleta')
   })
 
+  // -- variaveis_padrao ------------------------------------------------------
+  // Sem estas travas o jsonb entra CRU: a RPC faz um `coalesce` da chave e o
+  // adapter faz um cast. Forma errada não erra em lugar nenhum até o worker, já
+  // com as linhas de recipients/messages/outbox gravadas — e `variaveis_padrao`
+  // é write-once, então não há conserto pela tela.
+
+  it.each([
+    { caso: 'array (passa pelo isRecord do adapter)', valor: ['Ana', '10h'] as unknown },
+    { caso: 'escalar', valor: 'Ana' as unknown },
+    { caso: 'body string', valor: { body: 'Ana' } as unknown },
+    { caso: 'body com item não-string', valor: { body: ['ok', null] } as unknown },
+    { caso: 'headerText array', valor: { headerText: ['Ana'] } as unknown },
+    {
+      caso: 'buttonParams com chave não-numérica',
+      valor: { buttonParams: { url: 'x' } } as unknown,
+    },
+  ])('recusa variaveis_padrao $caso com 422 antes de chamar a RPC', async ({ valor }) => {
+    const admin = makeAdmin()
+    autenticado(admin)
+
+    const res = await listaRoute.POST(
+      postRequest({ ...corpoValido, config: { ...corpoValido.config, variaveis_padrao: valor } }),
+    )
+
+    expect(res.status).toBe(422)
+    expect((await res.json()).error).toBe('variaveis_padrao_invalida')
+    expect(admin.rpc).not.toHaveBeenCalled()
+  })
+
+  it('aplica os tetos de 40 valores e 1024 chars, com índice 1-indexado', async () => {
+    const admin = makeAdmin()
+    autenticado(admin)
+
+    const demais = await listaRoute.POST(
+      postRequest({
+        ...corpoValido,
+        config: {
+          ...corpoValido.config,
+          variaveis_padrao: { body: Array.from({ length: 41 }, () => 'x') },
+        },
+      }),
+    )
+    const longo = await listaRoute.POST(
+      postRequest({
+        ...corpoValido,
+        config: { ...corpoValido.config, variaveis_padrao: { body: ['ok', 'x'.repeat(1025)] } },
+      }),
+    )
+
+    expect(demais.status).toBe(422)
+    expect(await demais.json()).toMatchObject({ error: 'valores_demais', recebidos: 41 })
+    expect(longo.status).toBe(422)
+    // 1-indexado para casar com o `{{2}}` que o operador vê na tela.
+    expect(await longo.json()).toMatchObject({ error: 'valor_muito_longo', indice: 2 })
+    expect(admin.rpc).not.toHaveBeenCalled()
+  })
+
+  it('deixa um variaveis_padrao bem formado passar INTACTO para a RPC', async () => {
+    const admin = makeAdmin({ data: { ok: true, broadcast_id: CAMPANHA_ID, status: 'rascunho' } })
+    autenticado(admin)
+
+    const variaveisPadrao = {
+      body: ['Ana', '', '10h'],
+      headerMediaUrl: 'https://cdn/x.png',
+      buttonParams: { 0: 'promo-julho' },
+    }
+    const config = { ...corpoValido.config, variaveis_padrao: variaveisPadrao }
+
+    const res = await listaRoute.POST(postRequest({ ...corpoValido, config }))
+
+    expect(res.status).toBe(201)
+    // A rota filtra, não reescreve — inclusive o buraco no meio do body, que é
+    // significativo: compactar deslocaria {{3}} para o lugar de {{2}}.
+    expect(admin.rpc).toHaveBeenCalledWith(
+      'whatsapp_oficial_campanha_criar',
+      expect.objectContaining({ p_config: config }),
+    )
+  })
+
+  it('repassa o variaveis_insuficientes da RPC como 422 (o mínimo é do banco)', async () => {
+    autenticado(makeAdmin({ data: { ok: false, reason: 'variaveis_insuficientes', exigidas: 3 } }))
+
+    const res = await listaRoute.POST(postRequest(corpoValido))
+
+    expect(res.status).toBe(422)
+    expect((await res.json()).error).toBe('variaveis_insuficientes')
+  })
+
   it('recusa políticas fora do vocabulário e nome vazio com 422', async () => {
     const admin = makeAdmin()
     autenticado(admin)
@@ -473,6 +561,74 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
     expect(supabaseUser.from).toHaveBeenCalledWith('whatsapp_broadcasts')
     expect(supabaseUser.from).toHaveBeenCalledWith('whatsapp_broadcast_recipients')
     expect(admin.from).not.toHaveBeenCalled()
+  })
+
+  it('CRÍTICO: diz o que o template ainda exige — a tela não tem o catálogo', async () => {
+    // `variaveis_padrao` é write-once e é copiado para cada destinatário na
+    // materialização: quem aprova precisa saber ANTES do clique que o envio vai
+    // morrer com 422 permanente. E o veredito é recalculado a cada abertura de
+    // propósito — o sync reescreve `variaveis` de um template já aprovado.
+    const campanhaQuery = makeQuery({
+      data: {
+        id: CAMPANHA_ID,
+        nome: 'Reativação',
+        template_id: TEMPLATE_ID,
+        variaveis_padrao: { body: ['Ana'] },
+      },
+      error: null,
+    })
+    const templateQuery = makeQuery({
+      data: {
+        id: TEMPLATE_ID,
+        nome: 'order_confirmation',
+        variaveis: { cabecalho: [], corpo: [1, 2, 3], botoes: [] },
+        cabecalho_formato: null,
+        cabecalho_texto: null,
+        corpo_texto: 'Olá {{1}}, o pedido {{2}} chega em {{3}}.',
+        componentes: [{ type: 'BODY', text: 'Olá {{1}}, o pedido {{2}} chega em {{3}}.' }],
+      },
+      error: null,
+    })
+    const supabaseUser = {
+      from: vi.fn((tabela: string) => {
+        if (tabela === 'whatsapp_broadcasts') return campanhaQuery
+        if (tabela === 'whatsapp_templates') return templateQuery
+        return makeRecipientsQuery([[]])
+      }),
+    }
+    autenticado(makeAdmin(), supabaseUser)
+
+    const res = await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
+    const json = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(json.exigencias).toEqual({
+      templateId: TEMPLATE_ID,
+      nome: 'order_confirmation',
+      faltando: ['corpo {{2}}', 'corpo {{3}}'],
+      naoSuportado: null,
+    })
+    // Lido com a SESSÃO: `whatsapp_templates` só tem policy de SELECT para
+    // gestão, e um service_role aqui vazaria catálogo de outro tenant.
+    expect(supabaseUser.from).toHaveBeenCalledWith('whatsapp_templates')
+  })
+
+  it('campanha sem template não consulta o catálogo e devolve exigencias null', async () => {
+    const campanhaQuery = makeQuery({
+      data: { id: CAMPANHA_ID, template_id: null, variaveis_padrao: null },
+      error: null,
+    })
+    const supabaseUser = {
+      from: vi.fn((tabela: string) =>
+        tabela === 'whatsapp_broadcasts' ? campanhaQuery : makeRecipientsQuery([[]]),
+      ),
+    }
+    autenticado(makeAdmin(), supabaseUser)
+
+    const json = await (await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))).json()
+
+    expect(json.exigencias).toBeNull()
+    expect(supabaseUser.from).not.toHaveBeenCalledWith('whatsapp_templates')
   })
 
   it('ordena TODA página do agregado por uma coluna estável e única', async () => {

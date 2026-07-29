@@ -77,6 +77,7 @@ import {
 import { badgeStatusCampanha, TravasSaidaPainel } from "./gestao-shell";
 import type {
   CampanhaDetalhe,
+  CampanhaExigenciasTemplate,
   DestinatariosAgregado,
   GerarDestinatariosResultado,
   TravasSaida,
@@ -96,6 +97,9 @@ export function CampanhaDetalheClient({
 }) {
   const [campanha, setCampanha] = useState<CampanhaDetalhe | null>(null);
   const [destinatarios, setDestinatarios] = useState<DestinatariosAgregado | null>(null);
+  // O que o template ainda exige, calculado NO SERVIDOR (a tela não tem o
+  // catálogo). Vem `null` quando a campanha não tem template.
+  const [exigencias, setExigencias] = useState<CampanhaExigenciasTemplate | null>(null);
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
 
@@ -133,6 +137,7 @@ export function CampanhaDetalheClient({
     setErro(null);
     setCampanha(r.data.campanha);
     setDestinatarios(r.data.destinatarios);
+    setExigencias(r.data.exigencias);
   }, [campanhaId]);
 
   // Quem está logado, só para AVISAR sobre os quatro olhos antes do clique
@@ -264,6 +269,20 @@ export function CampanhaDetalheClient({
   // Avisar antes poupa o clique; recusar continua sendo trabalho do banco.
   const souOCriador = Boolean(usuarioId) && campanha.criado_por === usuarioId;
 
+  // AQUI é bloqueio, não aviso, e a diferença com os quatro olhos acima é o
+  // custo do erro: os quatro olhos são uma comparação que o banco refaz e
+  // recusa em milissegundos; variável faltando só aparece no worker, job a job,
+  // como 422 PERMANENTE — e `variaveis_padrao` é write-once, então a campanha
+  // aprovada nesse estado não tem conserto que não seja cancelar e recriar.
+  // O veredito vem do servidor (a tela não tem o catálogo) e é recalculado a
+  // cada abertura de propósito: o sync reescreve `variaveis` de um template já
+  // aprovado, então a Meta pode ter acrescentado um {{4}} DEPOIS da criação.
+  const motivoTemplate =
+    exigencias?.naoSuportado ??
+    (exigencias && exigencias.faltando.length > 0
+      ? `Faltam valores obrigatórios do template ${exigencias.nome}: ${exigencias.faltando.join(", ")}.`
+      : null);
+
   return (
     <div className="space-y-5">
       <VoltarParaLista />
@@ -300,10 +319,25 @@ export function CampanhaDetalheClient({
 
         {erroAcao && <ErroDeAcao erro={erroAcao} />}
 
+        {motivoTemplate && (
+          <Alert variant="destructive">
+            <AlertTriangle />
+            <AlertTitle>Esta campanha não pode ser aprovada</AlertTitle>
+            <AlertDescription>
+              <p>{motivoTemplate}</p>
+              <p className="mt-1">
+                Os valores das variáveis são gravados na CRIAÇÃO e copiados para cada destinatário
+                — não há como editá-los depois. Cancele esta campanha e crie outra já com os
+                valores preenchidos.
+              </p>
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="flex flex-wrap gap-2">
           <Button
             size="sm"
-            disabled={!aprovarLiberado || acaoEmCurso !== null}
+            disabled={!aprovarLiberado || Boolean(motivoTemplate) || acaoEmCurso !== null}
             onClick={() => void executarAcao("aprovar")}
           >
             {acaoEmCurso === "aprovar" ? (
@@ -372,7 +406,7 @@ export function CampanhaDetalheClient({
         )}
       </section>
 
-      <FichaTecnica campanha={campanha} />
+      <FichaTecnica campanha={campanha} exigencias={exigencias} />
 
       <Dialog open={confirmarMaterializar} onOpenChange={setConfirmarMaterializar}>
         <DialogContent>
@@ -750,7 +784,60 @@ function TabelaSupressao({
   );
 }
 
-function FichaTecnica({ campanha }: { campanha: CampanhaDetalhe }) {
+/**
+ * Uma linha por valor gravado em `variaveis_padrao`, com o nome no vocabulário
+ * do OPERADOR e não no do payload.
+ *
+ * A ficha mostra isto porque o dado é write-once e é copiado para cada
+ * destinatário na materialização: quem aprova precisa ver o que vai sair ANTES
+ * de clicar, e não depois, quando não há mais o que fazer.
+ */
+function ValoresDoTemplate({ campanha }: { campanha: CampanhaDetalhe }) {
+  const v = campanha.variaveis_padrao;
+  const linhas: [string, string][] = [];
+
+  for (const [i, valor] of (v?.body ?? []).entries()) {
+    linhas.push([`corpo {{${i + 1}}}`, valor]);
+  }
+  if (v?.headerText) linhas.push(["cabeçalho", v.headerText]);
+  if (v?.headerMediaUrl) linhas.push(["mídia do cabeçalho", v.headerMediaUrl]);
+  if (v?.headerMediaId) linhas.push(["mídia do cabeçalho (id)", v.headerMediaId]);
+  for (const [chave, valor] of Object.entries(v?.buttonParams ?? {})) {
+    linhas.push([`botão ${Number(chave) + 1}`, valor]);
+  }
+
+  return (
+    <div>
+      <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
+        Valores das variáveis
+      </p>
+      {linhas.length === 0 ? (
+        <p className="mt-0.5 text-sm text-muted-foreground">
+          Nenhum — só serve para template sem variável nem mídia.
+        </p>
+      ) : (
+        <dl className="mt-1 space-y-1">
+          {linhas.map(([rotulo, valor]) => (
+            <div key={rotulo} className="flex gap-2 text-sm">
+              <dt className="shrink-0 font-mono text-xs text-muted-foreground">{rotulo}</dt>
+              <dd className="min-w-0 break-words text-foreground">
+                {valor || <span className="text-destructive">(vazio)</span>}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+function FichaTecnica({
+  campanha,
+  exigencias,
+}: {
+  campanha: CampanhaDetalhe;
+  exigencias: CampanhaExigenciasTemplate | null;
+}) {
   const seg = (campanha.segmentacao ?? {}) as Record<string, unknown>;
   const segEntradas = Object.entries(seg).filter(([, v]) =>
     Array.isArray(v) ? v.length > 0 : v !== null && v !== undefined && v !== "",
@@ -786,7 +873,12 @@ function FichaTecnica({ campanha }: { campanha: CampanhaDetalhe }) {
               : null
           }
         />
-        <Campo rotulo="Template" valor={campanha.template_id ? "vinculado" : "sem template"} />
+        <Campo
+          rotulo="Template"
+          valor={
+            exigencias ? exigencias.nome : campanha.template_id ? "vinculado" : "sem template"
+          }
+        />
         <Campo
           rotulo="Mensagem livre"
           valor={campanha.mensagem_livre ? "definida" : null}
@@ -805,6 +897,8 @@ function FichaTecnica({ campanha }: { campanha: CampanhaDetalhe }) {
           <Campo rotulo="Motivo do cancelamento" valor={campanha.motivo_cancelamento} />
         )}
       </dl>
+
+      {campanha.template_id && <ValoresDoTemplate campanha={campanha} />}
 
       <div>
         <p className="text-[10px] tracking-wide text-muted-foreground uppercase">Segmentação</p>

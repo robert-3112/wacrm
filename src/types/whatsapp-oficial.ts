@@ -160,8 +160,36 @@ export interface TemplateVariaveis {
   botoes: TemplateBotaoVariaveis[]
 }
 
+/**
+ * Valores de envio gravados em `whatsapp_broadcasts.variaveis_padrao`, copiados
+ * para cada `whatsapp_broadcast_recipients.variaveis` na materialização do
+ * público e daí para `payload.messageParams` do job.
+ *
+ * É EXATAMENTE o `SendTimeParams` de `template-send-builder.ts` — o adapter
+ * `meta_cloud` faz um cast direto do jsonb para aquele tipo, sem zod nem
+ * validação de campo. Chave fora desta lista é descartada em silêncio: um
+ * `{ "nome": "Ana" }` ou `{ "corpo": [...] }` (o vocabulário do PREVIEW, que é
+ * outro) atravessa o banco inteiro sem uma reclamação e só aparece no envio
+ * como "only 0 value(s) were supplied", apontando para o lugar errado.
+ */
+export interface VariaveisPadrao {
+  /** Valores de `{{1}}, {{2}}, …` do CORPO, por POSIÇÃO (denso, 0-indexado). */
+  body?: string[]
+  /** Cabeçalho de TEXTO consome UMA string, não array — o builder emite um
+   *  parâmetro só por header, mesmo que o texto tenha vários `{{N}}`. */
+  headerText?: string
+  /** Link da mídia de um header IMAGE/VIDEO/DOCUMENT. */
+  headerMediaUrl?: string
+  /** Alternativa ao link: id de mídia já subida na Meta. */
+  headerMediaId?: string
+  /** Por POSIÇÃO do botão (0-based). No jsonb a chave vira string (`"0"`), e o
+   *  builder acessa por índice numérico — a coerção do JS resolve. */
+  buttonParams?: Record<number, string>
+}
+
 /** Uma linha de `GET /api/whatsapp-oficial/templates` (o blob `componentes`
- *  fica de fora de propósito — só o preview precisa dele). */
+ *  fica de fora de propósito — só o preview precisa dele; a rota devolve no
+ *  lugar os dois fatos derivados que a tela precisa saber sobre ele). */
 export interface WhatsAppTemplate {
   id: string
   canal_id: string
@@ -178,6 +206,24 @@ export interface WhatsAppTemplate {
   variaveis: TemplateVariaveis | null
   motivo_rejeicao: string | null
   sincronizado_em: string | null
+  /**
+   * Tipos dos blocos de `componentes`, em MAIÚSCULA e na ordem em que aparecem
+   * — derivado pela rota, que não devolve o blob. É o que permite marcar como
+   * NÃO SELECIONÁVEL um template cuja forma o envio não sabe montar (CAROUSEL,
+   * LIMITED_TIME_OFFER, …) em vez de descobrir isso destinatário a
+   * destinatário.
+   *
+   * `null` significa "o blob não é um array" — template malformado, que o
+   * builder recusa inteiro. Não é o mesmo que `[]` (array sem blocos).
+   */
+  tipos_componentes: string[] | null
+  /**
+   * O HEADER de mídia tem `example.header_url[0]` preenchido. É o ÚNICO
+   * fallback que o builder aceita quando ninguém informa a mídia no envio —
+   * medido em produção (2026-07-29), o `image_cta` real NÃO tem, então na
+   * prática o link precisa ser digitado.
+   */
+  cabecalho_midia_exemplo: boolean
 }
 
 /** Resposta de `POST /api/whatsapp-oficial/templates/sync`. */
@@ -272,7 +318,7 @@ export interface DryRunResultado {
 export interface CampanhaDetalhe extends CampanhaResumo {
   mensagem_livre: string | null
   segmentacao: Record<string, unknown> | null
-  variaveis_padrao: Record<string, unknown> | null
+  variaveis_padrao: VariaveisPadrao | null
   cadencia_segundos: number | null
   limite_diario: number | null
   lote_max: number | null
@@ -301,10 +347,33 @@ export interface DestinatariosAgregado {
   por_motivo_supressao: Record<string, number>
 }
 
+/**
+ * O que o template da campanha ainda exige, resolvido NO SERVIDOR na abertura
+ * da tela de detalhe.
+ *
+ * Existe porque `variaveis_padrao` é WRITE-ONCE — não há RPC de edição de
+ * campanha nem policy de UPDATE em `whatsapp_broadcasts` — e é copiado para
+ * cada destinatário na materialização. Sem isto o operador aprova às cegas uma
+ * campanha cujo envio vai falhar com 422 permanente no primeiro disparo, e o
+ * único conserto é cancelar e recriar.
+ *
+ * `null` quando a campanha não tem template (Evolution/mensagem livre) ou
+ * quando o template sumiu do catálogo.
+ */
+export interface CampanhaExigenciasTemplate {
+  templateId: string
+  nome: string
+  /** Rótulos legíveis do que falta. Vazio = a campanha tem tudo que precisa. */
+  faltando: string[]
+  /** Motivo pelo qual o template inteiro não pode ser enviado (CAROUSEL etc.). */
+  naoSuportado: string | null
+}
+
 export interface CampanhaDetalheResposta {
   ok: true
   campanha: CampanhaDetalhe
   destinatarios: DestinatariosAgregado
+  exigencias: CampanhaExigenciasTemplate | null
 }
 
 /** Resposta de `POST /campanhas/[id]/destinatarios`. Os dois modos devolvem

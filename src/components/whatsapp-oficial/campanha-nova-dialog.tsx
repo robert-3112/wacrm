@@ -10,9 +10,18 @@
  * vocabulário desta API lista vazia NÃO é "sem filtro": `bases_legais: []` com
  * a política padrão suprime todo mundo, e `janela_dias: []` bloqueia todos os
  * dias. Os dois erros são silenciosos depois de gravados.
+ *
+ * O fieldset "Variáveis do template" é o campo que faltava e que fazia toda
+ * campanha com `{{N}}` falhar em 100% dos envios: sem ele, `variaveis_padrao`
+ * nascia `{}`, era copiado assim para cada destinatário e o job morria com 422
+ * PERMANENTE na primeira tentativa. Ele é gerado a partir do template
+ * escolhido, que a tela JÁ TEM em memória (`templates: WhatsAppTemplate[]`) —
+ * nenhuma busca nova. E vale a pena preencher com cuidado: `variaveis_padrao` é
+ * WRITE-ONCE (não existe RPC de edição de campanha), então errar aqui só se
+ * conserta cancelando e recriando a campanha inteira.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -38,6 +47,15 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { criarCampanha, type FormularioCampanha } from "@/lib/whatsapp-oficial/gestao-actions";
+import {
+  camposFaltando,
+  derivarCamposTemplate,
+  montarVariaveisPadrao,
+  motivoTemplateNaoSuportado,
+  rotuloCampo,
+  type CampoTemplate,
+  type ValoresCampos,
+} from "@/lib/whatsapp-oficial/template-campos";
 import type { WhatsAppCanal, WhatsAppTemplate } from "@/types/whatsapp-oficial";
 
 const POLITICAS_CONSENTIMENTO = [
@@ -120,12 +138,53 @@ export function CampanhaNovaDialog({
   const [temperaturas, setTemperaturas] = useState("");
   const [tags, setTags] = useState("");
   const [semCorretor, setSemCorretor] = useState(false);
+  const [valoresVars, setValoresVars] = useState<ValoresCampos>({});
 
   const canal = canais.find((c) => c.id === canalId) ?? null;
   const aprovados = templates.filter((t) => t.status_aprovacao === "aprovado");
   const exigeBaseLegal = politicaConsentimento === "exigir_base_legal";
   const semBaseLegal = exigeBaseLegal && basesLegais.length === 0;
   const janelaPelaMetade = Boolean(janelaInicio) !== Boolean(janelaFim);
+
+  const templateEscolhido =
+    templateId === SEM_TEMPLATE ? null : (aprovados.find((t) => t.id === templateId) ?? null);
+
+  // Templates que o envio não sabe montar continuam LISTADOS, mas travados: o
+  // operador precisa ver que eles existem e por que não servem, senão abre
+  // chamado perguntando cadê o template que ele aprovou na Meta.
+  const bloqueados = useMemo(
+    () =>
+      aprovados
+        .map((t) => ({ template: t, motivo: motivoTemplateNaoSuportado(t) }))
+        .filter((x): x is { template: WhatsAppTemplate; motivo: string } => x.motivo !== null),
+    [aprovados],
+  );
+  const bloqueioPorId = useMemo(
+    () => new Map(bloqueados.map((b) => [b.template.id, b.motivo])),
+    [bloqueados],
+  );
+
+  const campos = useMemo(
+    () => (templateEscolhido ? derivarCamposTemplate(templateEscolhido) : []),
+    [templateEscolhido],
+  );
+  const faltandoVars = camposFaltando(campos, valoresVars);
+
+  /**
+   * Por que o botão está desligado, em português e à vista.
+   *
+   * Deixar criar e recusar depois seria pior do que parece: o rascunho já
+   * gravado com variável faltando NÃO tem conserto pela tela, porque
+   * `variaveis_padrao` é write-once. O bloqueio aqui é a primeira linha; a
+   * definitiva é a RPC, que recusa quem chamar direto.
+   */
+  const impedimentos: string[] = [];
+  if (!nome.trim()) impedimentos.push("dar um nome à campanha");
+  if (semBaseLegal) impedimentos.push("marcar ao menos uma base legal");
+  if (janelaPelaMetade) impedimentos.push("completar a janela de horário (início e fim)");
+  if (faltandoVars.length > 0) {
+    impedimentos.push(`preencher ${faltandoVars.map(rotuloCampo).join(", ")}`);
+  }
 
   const listaDeTexto = (valor: string): string[] =>
     valor
@@ -151,7 +210,18 @@ export function CampanhaNovaDialog({
     setTemperaturas("");
     setTags("");
     setSemCorretor(false);
+    setValoresVars({});
     setErro(null);
+  };
+
+  /**
+   * Trocar de template ZERA os valores digitados. Não é higiene: manter o
+   * `{{1}}` do template anterior no `{{1}}` do novo produz uma mensagem
+   * plausível e errada — o mesmo cuidado que o painel de preview já toma.
+   */
+  const escolherTemplate = (novo: string) => {
+    setTemplateId(novo);
+    setValoresVars({});
   };
 
   const handleSalvar = async () => {
@@ -162,6 +232,12 @@ export function CampanhaNovaDialog({
     }
     if (!canalId) {
       setErro("Escolha um canal antes de criar a campanha.");
+      return;
+    }
+    if (faltandoVars.length > 0) {
+      setErro(
+        `Faltam valores obrigatórios do template: ${faltandoVars.map(rotuloCampo).join(", ")}.`,
+      );
       return;
     }
 
@@ -180,6 +256,7 @@ export function CampanhaNovaDialog({
       janelaInicio,
       janelaFim,
       janelaDias,
+      variaveisPadrao: montarVariaveisPadrao(campos, valoresVars),
       segmentacao: {
         etapas: listaDeTexto(etapas),
         temperaturas: listaDeTexto(temperaturas),
@@ -243,7 +320,7 @@ export function CampanhaNovaDialog({
             </legend>
             <div className="space-y-1.5">
               <Label htmlFor="campanha-template">Template aprovado</Label>
-              <Select value={templateId} onValueChange={(v) => v && setTemplateId(String(v))}>
+              <Select value={templateId} onValueChange={(v) => v && escolherTemplate(String(v))}>
                 <SelectTrigger id="campanha-template" className="w-full">
                   <SelectValue>
                     {(v: string | null) =>
@@ -255,11 +332,15 @@ export function CampanhaNovaDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={SEM_TEMPLATE}>Sem template</SelectItem>
-                  {aprovados.map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.nome} · {t.idioma}
-                    </SelectItem>
-                  ))}
+                  {aprovados.map((t) => {
+                    const bloqueio = bloqueioPorId.get(t.id);
+                    return (
+                      <SelectItem key={t.id} value={t.id} disabled={Boolean(bloqueio)}>
+                        {t.nome} · {t.idioma}
+                        {bloqueio ? " — não suportado" : ""}
+                      </SelectItem>
+                    );
+                  })}
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
@@ -269,6 +350,21 @@ export function CampanhaNovaDialog({
                     ? "Nenhum template aprovado neste canal — sincronize o catálogo antes."
                     : "Só templates aprovados aparecem aqui; é o único status que o envio aceita."}
               </p>
+              {bloqueados.length > 0 && (
+                <div className="rounded-md border border-border bg-muted/40 p-2">
+                  <p className="text-xs font-medium text-foreground">
+                    Aprovados na Meta, mas indisponíveis aqui:
+                  </p>
+                  <ul className="mt-1 space-y-1">
+                    {bloqueados.map(({ template, motivo }) => (
+                      <li key={template.id} className="text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground">{template.nome}</span> —{" "}
+                        {motivo}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
 
             <div className="space-y-1.5">
@@ -282,6 +378,41 @@ export function CampanhaNovaDialog({
               />
             </div>
           </fieldset>
+
+          {templateEscolhido && (
+            <fieldset className="space-y-3">
+              <legend className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                Variáveis do template
+              </legend>
+              {campos.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">{templateEscolhido.nome}</span> não
+                  tem variável nem mídia — o texto aprovado sai exatamente como está.
+                </p>
+              ) : (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    <span className="font-medium text-foreground">{templateEscolhido.nome}</span>{" "}
+                    exige {campos.length} {campos.length === 1 ? "valor" : "valores"}. O mesmo valor
+                    vai para TODOS os destinatários — nada aqui é personalizado por lead. Depois de
+                    criada, a campanha não aceita correção: só cancelar e refazer.
+                  </p>
+                  <div className="space-y-3">
+                    {campos.map((campo) => (
+                      <CampoVariavel
+                        key={campo.chave}
+                        campo={campo}
+                        valor={valoresVars[campo.chave] ?? ""}
+                        onChange={(v) =>
+                          setValoresVars((prev) => ({ ...prev, [campo.chave]: v }))
+                        }
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+            </fieldset>
+          )}
 
           <fieldset className="space-y-3">
             <legend className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
@@ -509,13 +640,20 @@ export function CampanhaNovaDialog({
           )}
         </div>
 
+        {impedimentos.length > 0 && (
+          <p className="text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">Falta para criar:</span>{" "}
+            {impedimentos.join("; ")}.
+          </p>
+        )}
+
         <DialogFooter>
           <Button variant="outline" onClick={() => setAberto(false)} disabled={salvando}>
             Cancelar
           </Button>
           <Button
             onClick={() => void handleSalvar()}
-            disabled={salvando || !nome.trim() || semBaseLegal || janelaPelaMetade}
+            disabled={salvando || impedimentos.length > 0}
           >
             {salvando && <Loader2 data-icon="inline-start" className="animate-spin" />}
             Criar rascunho
@@ -523,6 +661,56 @@ export function CampanhaNovaDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * Uma linha de valor de template. Segue a forma do `BlocoVariaveis` do painel de
+ * preview (label monoespaçado de largura fixa + input de 1024) para as duas
+ * telas não parecerem de sistemas diferentes, e acrescenta o que faltava lá: o
+ * TRECHO do texto em volta do `{{N}}`. Sem ele o operador preenche "variável 2"
+ * sem saber se é o nome do cliente ou o nome do empreendimento.
+ */
+function CampoVariavel({
+  campo,
+  valor,
+  onChange,
+}: {
+  campo: CampoTemplate;
+  valor: string;
+  onChange: (v: string) => void;
+}) {
+  const id = `var-${campo.chave.replace(":", "-")}`;
+  const vazio = valor.trim().length === 0;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-start gap-2">
+        <Label htmlFor={id} className="w-28 shrink-0 pt-2 font-mono text-xs break-words">
+          {campo.rotulo}
+        </Label>
+        <div className="flex-1 space-y-1">
+          <Input
+            id={id}
+            value={valor}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={
+              campo.onde === "midia" ? "https://..." : `Valor de ${campo.rotulo}`
+            }
+            maxLength={1024}
+            aria-invalid={campo.obrigatorio && vazio}
+          />
+          {campo.contexto && (
+            <p className="text-xs break-words text-muted-foreground">
+              no texto: <span className="font-mono">{campo.contexto}</span>
+            </p>
+          )}
+          {campo.ajuda && <p className="text-xs text-muted-foreground">{campo.ajuda}</p>}
+          {campo.obrigatorio && vazio && (
+            <p className="text-xs text-destructive">Obrigatório — sem valor, o envio é recusado.</p>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

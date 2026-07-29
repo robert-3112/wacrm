@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireGestaoSession, toErrorResponse } from '@/lib/whatsapp-oficial/api-auth'
+import { resumirComponentes } from '@/lib/whatsapp-oficial/template-campos'
 
 /**
  * Lista o catálogo de templates oficiais visível para quem chamou.
@@ -17,8 +18,19 @@ import { requireGestaoSession, toErrorResponse } from '@/lib/whatsapp-oficial/ap
  * Numa leitura de lista não existe RPC para revalidar nada.
  */
 
-/** Campos úteis para a tela de templates. `componentes` fica de fora de propósito:
- *  é um blob grande e só o preview precisa dele (rota `/templates/preview`). */
+/**
+ * Campos úteis para a tela de templates.
+ *
+ * `componentes` é LIDO mas NÃO devolvido: continua fora da resposta de
+ * propósito (é um blob grande e o catálogo do canal inteiro vem numa tacada),
+ * só que agora dois fatos precisam ser destilados dele antes de descartá-lo —
+ * quais TIPOS de bloco o template tem (um CAROUSEL não pode ser escolhido numa
+ * campanha: o envio o descartaria em silêncio e entregaria a mensagem
+ * mutilada) e se o header de mídia traz `example.header_url`, o único fallback
+ * que o envio aceita quando ninguém informa a mídia. Nenhum dos dois está em
+ * outra coluna: `variaveis` não fala de tipo de bloco, e `cabecalho_formato`
+ * não fala de exemplo.
+ */
 const TEMPLATE_FIELDS = [
   'id',
   'canal_id',
@@ -35,6 +47,7 @@ const TEMPLATE_FIELDS = [
   'variaveis',
   'motivo_rejeicao',
   'sincronizado_em',
+  'componentes',
 ].join(', ')
 
 export async function GET(request: Request): Promise<Response> {
@@ -60,7 +73,17 @@ export async function GET(request: Request): Promise<Response> {
       return NextResponse.json({ error: 'template_list_failed' }, { status: 500 })
     }
 
-    return NextResponse.json({ templates: data ?? [] })
+    const templates = ((data ?? []) as unknown as Record<string, unknown>[]).map((linha) => {
+      const { componentes, ...resto } = linha
+      const resumo = resumirComponentes(componentes)
+      return {
+        ...resto,
+        tipos_componentes: resumo.tipos,
+        cabecalho_midia_exemplo: resumo.cabecalhoMidiaExemplo,
+      }
+    })
+
+    return NextResponse.json({ templates })
   } catch (error) {
     return toErrorResponse(error)
   }

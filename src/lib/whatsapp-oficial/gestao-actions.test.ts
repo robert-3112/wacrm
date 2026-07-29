@@ -202,6 +202,32 @@ describe('montarConfigCampanha', () => {
     // (que usa o default 30 da RPC).
     expect(montarConfigCampanha({ ...base, cooldownDias: 0 }).cooldown_dias).toBe(0)
   })
+
+  it('omite variaveis_padrao quando não há nada preenchido', () => {
+    // Aqui `{}` não é bomba (é literalmente o default da coluna), é ruído — e
+    // template estático, como o `hello_world`, legitimamente não exige nada.
+    expect('variaveis_padrao' in montarConfigCampanha(base)).toBe(false)
+    expect('variaveis_padrao' in montarConfigCampanha({ ...base, variaveisPadrao: {} })).toBe(false)
+  })
+
+  it('CRÍTICO: manda variaveis_padrao na forma de ENVIO, com o body denso', () => {
+    // `body` por POSIÇÃO, `headerText` string (não array), `buttonParams` por
+    // índice de botão. Qualquer outra forma é descartada em silêncio pelo
+    // adapter e só aparece no envio como "only 0 value(s) were supplied".
+    const config = montarConfigCampanha({
+      ...base,
+      variaveisPadrao: {
+        body: ['Ana', '', '10h'],
+        headerText: 'Visita confirmada',
+        buttonParams: { 0: 'promo-julho' },
+      },
+    })
+    expect(config.variaveis_padrao).toEqual({
+      body: ['Ana', '', '10h'],
+      headerText: 'Visita confirmada',
+      buttonParams: { 0: 'promo-julho' },
+    })
+  })
 })
 
 describe('montarCorpoCampanha', () => {

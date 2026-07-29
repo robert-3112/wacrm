@@ -46,8 +46,32 @@ export class TemplateBuildError extends Error {
  * Os quatro tipos de componente que este builder sabe traduzir para o payload de envio.
  * Lista POSITIVA de propósito: formato novo que a Meta lançar amanhã cai fora e é
  * recusado, em vez de ser descartado em silêncio.
+ *
+ * EXPORTADA porque a tela de campanha precisa da MESMA lista para marcar o template como
+ * não selecionável antes de alguém criar público em cima dele. Duas cópias da lista
+ * divergiriam no dia em que uma delas ganhasse um tipo novo — e a divergência aparece só
+ * no envio, destinatário a destinatário.
  */
-const TIPOS_SUPORTADOS = new Set(['HEADER', 'BODY', 'FOOTER', 'BUTTONS'])
+export const TIPOS_COMPONENTE_SUPORTADOS = ['HEADER', 'BODY', 'FOOTER', 'BUTTONS'] as const
+
+const TIPOS_SUPORTADOS: ReadonlySet<string> = new Set(TIPOS_COMPONENTE_SUPORTADOS)
+
+/**
+ * Formatos de HEADER que este builder sabe montar. Lista POSITIVA pelo mesmo motivo da lista de
+ * tipos acima, e não por simetria estética: o parâmetro de mídia era escolhido por ELIMINAÇÃO
+ * (`IMAGE ? image : VIDEO ? video : document`), então um header `LOCATION` — que existe hoje na
+ * Cloud API — virava `{type:'document', document:{link}}`. Payload que a Meta recusa, em rajada,
+ * no número cujo quality rating importa. Formato desconhecido agora é recusado antes de montar
+ * qualquer coisa.
+ *
+ * EXPORTADA porque `template-campos.ts` precisa da MESMA lista para marcar o template como não
+ * selecionável na tela — sem isso a tela não renderiza campo nenhum (não é mídia para ela) e o
+ * banco recusa por "faltou valor" que não existe campo para preencher: beco sem saída.
+ */
+export const FORMATOS_CABECALHO_SUPORTADOS = ['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT'] as const
+
+/** Os três que exigem mídia no envio — o resto de `FORMATOS_CABECALHO_SUPORTADOS` é texto. */
+const FORMATOS_MIDIA: ReadonlySet<string> = new Set(['IMAGE', 'VIDEO', 'DOCUMENT'])
 
 export interface MetaTemplateComponent {
   type: 'HEADER' | 'BODY' | 'FOOTER' | 'BUTTONS'
@@ -118,13 +142,30 @@ function buildHeaderComponent(
 ): MetaSendComponent | null {
   if (!header) return null
 
-  if (header.format === 'TEXT' || !header.format) {
+  // `format` chega como jsonb do banco: o tipo acima some em runtime e o valor pode ser
+  // qualquer string que a Meta tenha inventado. Normaliza uma vez e decide sobre ela.
+  const formato = String(header.format ?? '')
+    .trim()
+    .toUpperCase()
+
+  if (formato === '' || formato === 'TEXT') {
     const varCount = extractVariableIndices(header.text).length
     if (varCount === 0) return null
     if (!params.headerText || !params.headerText.trim()) {
       throw new TemplateBuildError('Header text variable {{1}} requires a value — pass headerText.')
     }
     return { type: 'header', parameters: [{ type: 'text', text: params.headerText }] }
+  }
+
+  // Formato fora da lista (LOCATION, PRODUCT, o que vier amanhã). Antes caía no ramo de mídia e
+  // saía como `document` por eliminação — payload que a Meta recusa. Recusar aqui troca "rajada
+  // de recusa real" por "não dá para usar, e diz por quê".
+  if (!FORMATOS_MIDIA.has(formato)) {
+    throw new TemplateBuildError(
+      `Header format "${header.format}" is not supported by this sender ` +
+        `(supported: ${FORMATOS_CABECALHO_SUPORTADOS.join(', ')}). ` +
+        'Sending it would emit the wrong parameter type and Meta would reject the message.',
+    )
   }
 
   // IMAGE / VIDEO / DOCUMENT — Meta requires the media component on every
@@ -134,14 +175,14 @@ function buildHeaderComponent(
   const id = params.headerMediaId
   if (!link && !id) {
     throw new TemplateBuildError(
-      `${header.format} header requires a media link or id at send time — pass headerMediaUrl or headerMediaId.`,
+      `${formato} header requires a media link or id at send time — pass headerMediaUrl or headerMediaId.`,
     )
   }
   const media: { link?: string; id?: string } = id ? { id } : { link }
   const parameter: MetaSendParameter =
-    header.format === 'IMAGE'
+    formato === 'IMAGE'
       ? { type: 'image', image: media }
-      : header.format === 'VIDEO'
+      : formato === 'VIDEO'
         ? { type: 'video', video: media }
         : { type: 'document', document: media }
   return { type: 'header', parameters: [parameter] }
@@ -262,6 +303,37 @@ export function buildSendComponents(
   // Recusar não implementa carrossel — implementar é grande (card_index, mídia por card,
   // extração de variáveis descendo em cards[].components[], mais UI). Recusar troca
   // "quebra em massa e silenciosa" por "não dá para usar, e diz por quê".
+  // Mesma história do array acima, do outro lado do payload: `params` é o jsonb
+  // `messageParams` do job, e o único portão até aqui é o `isRecord` do adapter
+  // (meta-cloud.ts:70) — que ACEITA array e não olha uma única chave. Sem estes três
+  // guards, forma errada não vira 422: vira TypeError puro lá embaixo
+  // (`values.slice(...).map` não existe em string; `(42).slice` não é função), e
+  // TypeError não tem `httpStatus`, então `classifyMetaError` devolve
+  // `unknown_error_default_retryable` — 5 tentativas com backoff de até 6h POR
+  // destinatário, exatamente o que o TemplateBuildError foi criado para matar.
+  // O item não-string existe pelo motivo oposto: `String(null)` entrega a palavra
+  // "null" ao cliente, calada.
+  if (params.body !== undefined && params.body !== null) {
+    if (!Array.isArray(params.body)) {
+      throw new TemplateBuildError(
+        `messageParams.body must be an array of strings (got ${typeof params.body}).`,
+      )
+    }
+    const posicao = params.body.findIndex((v) => typeof v !== 'string')
+    if (posicao >= 0) {
+      throw new TemplateBuildError(
+        `messageParams.body[${posicao}] must be a string (got ${typeof params.body[posicao]}).`,
+      )
+    }
+  }
+  if (params.buttonParams !== undefined && params.buttonParams !== null) {
+    if (typeof params.buttonParams !== 'object' || Array.isArray(params.buttonParams)) {
+      throw new TemplateBuildError(
+        'messageParams.buttonParams must be an object keyed by button index.',
+      )
+    }
+  }
+
   const naoSuportado = componentes.find(
     (c) => !TIPOS_SUPORTADOS.has(String(c?.type ?? '').toUpperCase()),
   )
