@@ -19,6 +19,36 @@
  * this module only consumes it at send time.
  */
 
+/**
+ * Um template APROVADO cuja forma este builder não sabe montar, ou um envio sem os
+ * valores que o template exige. NÃO é erro transitório: tentar de novo dá o mesmo
+ * resultado, sempre.
+ *
+ * `httpStatus = 422` existe por um motivo mecânico, não decorativo: `extractErrorInfo`
+ * (outbox-worker.ts) lê `httpStatus` de qualquer objeto lançado, e `classifyMetaError`
+ * (outbox.ts) trata `httpStatus >= 400` como PERMANENTE. Um `Error` pelado — que é o que
+ * este arquivo lançava — não tem `httpStatus` nem `code`, então caía no último `return`
+ * de `classifyMetaError`: `unknown_error_default_retryable`. Consequência medida numa
+ * campanha de 500 destinatários com template de 3 variáveis: 500 jobs × 5 tentativas com
+ * backoff de 30s a 6h = 2.500 ciclos de worker ao longo de horas, zero mensagem enviada,
+ * e o operador lendo "erro transitório desconhecido" para um defeito determinístico.
+ * Com 422 o job morre na primeira tentativa e `last_error_code` vira `http_422`.
+ */
+export class TemplateBuildError extends Error {
+  readonly httpStatus = 422
+  constructor(message: string) {
+    super(message)
+    this.name = 'TemplateBuildError'
+  }
+}
+
+/**
+ * Os quatro tipos de componente que este builder sabe traduzir para o payload de envio.
+ * Lista POSITIVA de propósito: formato novo que a Meta lançar amanhã cai fora e é
+ * recusado, em vez de ser descartado em silêncio.
+ */
+const TIPOS_SUPORTADOS = new Set(['HEADER', 'BODY', 'FOOTER', 'BUTTONS'])
+
 export interface MetaTemplateComponent {
   type: 'HEADER' | 'BODY' | 'FOOTER' | 'BUTTONS'
   format?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT'
@@ -92,7 +122,7 @@ function buildHeaderComponent(
     const varCount = extractVariableIndices(header.text).length
     if (varCount === 0) return null
     if (!params.headerText || !params.headerText.trim()) {
-      throw new Error('Header text variable {{1}} requires a value — pass headerText.')
+      throw new TemplateBuildError('Header text variable {{1}} requires a value — pass headerText.')
     }
     return { type: 'header', parameters: [{ type: 'text', text: params.headerText }] }
   }
@@ -103,7 +133,7 @@ function buildHeaderComponent(
   const link = params.headerMediaUrl ?? header.example?.header_url?.[0]
   const id = params.headerMediaId
   if (!link && !id) {
-    throw new Error(
+    throw new TemplateBuildError(
       `${header.format} header requires a media link or id at send time — pass headerMediaUrl or headerMediaId.`,
     )
   }
@@ -126,7 +156,7 @@ function buildBodyComponent(
   const values = params.body ?? []
   if (varCount === 0 && values.length === 0) return null
   if (values.length < varCount) {
-    throw new Error(
+    throw new TemplateBuildError(
       `Body has ${varCount} variable(s) but only ${values.length} value(s) were supplied.`,
     )
   }
@@ -160,7 +190,7 @@ function buildButtonComponent(
   switch (button.type) {
     case 'URL': {
       if (!override || !override.trim()) {
-        throw new Error(
+        throw new TemplateBuildError(
           `URL button #${index + 1} uses {{1}} — requires a buttonParams[${index}] value.`,
         )
       }
@@ -174,7 +204,9 @@ function buildButtonComponent(
     case 'COPY_CODE': {
       const code = override?.trim() || button.example?.[0]
       if (!code) {
-        throw new Error(`COPY_CODE button #${index + 1} has no code (override or template example).`)
+        throw new TemplateBuildError(
+          `COPY_CODE button #${index + 1} has no code (override or template example).`,
+        )
       }
       return {
         type: 'button',
@@ -206,6 +238,41 @@ export function buildSendComponents(
   componentes: MetaTemplateComponent[],
   params: SendTimeParams = {},
 ): MetaSendComponent[] {
+  // `componentes` chega como jsonb do banco, gravado VERBATIM pelo sync. O tipo
+  // `MetaTemplateComponent` acima some em runtime — não há zod nem validação no caminho,
+  // então a única barreira real é esta.
+  if (!Array.isArray(componentes)) {
+    throw new TemplateBuildError(
+      `Template componentes must be an array (got ${typeof componentes}) — the stored template is malformed.`,
+    )
+  }
+
+  // Recusa ANTES de montar qualquer coisa. Sem isto, um componente que este builder não
+  // conhece era simplesmente ignorado pelos três `find()` abaixo — e o envio saía
+  // mutilado em vez de falhar.
+  //
+  // Medido contra a Graph API real (2026-07-29): o template de carrossel da Meta tem
+  // [BODY, BUTTONS, CAROUSEL], nenhum com variável. Os `find()` achavam BODY e BUTTONS,
+  // nenhum dos dois exigia parâmetro, o retorno era `[]`, e `meta-api.ts` OMITE a chave
+  // `components` quando o array é vazio — o POST saía como `{name, language}` puro, sem
+  // os cards que são a razão de existir do template. Numa campanha de 500, isso vira
+  // 500 chamadas reais à Meta com payload quebrado, e rajada concentrada de recusa é
+  // exatamente o que derruba o quality rating do número.
+  //
+  // Recusar não implementa carrossel — implementar é grande (card_index, mídia por card,
+  // extração de variáveis descendo em cards[].components[], mais UI). Recusar troca
+  // "quebra em massa e silenciosa" por "não dá para usar, e diz por quê".
+  const naoSuportado = componentes.find(
+    (c) => !TIPOS_SUPORTADOS.has(String(c?.type ?? '').toUpperCase()),
+  )
+  if (naoSuportado) {
+    throw new TemplateBuildError(
+      `Template component "${naoSuportado.type}" is not supported by this sender ` +
+        `(supported: ${[...TIPOS_SUPORTADOS].join(', ')}). ` +
+        'Sending it would silently drop that component and deliver a mutilated message.',
+    )
+  }
+
   const out: MetaSendComponent[] = []
 
   const header = componentes.find((c) => c.type === 'HEADER')
