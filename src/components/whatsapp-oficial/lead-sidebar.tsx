@@ -36,14 +36,32 @@ import { addInternalNote } from "@/lib/whatsapp-oficial/inbox-actions";
 import { toast } from "sonner";
 import type { WhatsAppConversation, WhatsAppInternalNote } from "@/types/whatsapp-oficial";
 
-/** Base URL of the SUNT CRM (Lovable app) that owns the full lead record.
- *  Unset in most local/dev setups — the button below hides itself rather
- *  than link somewhere broken. See `.env.local.example`. */
+/** Base URL do CRM da SUNT (app Lovable), que é dono da ficha completa do lead. */
 const CRM_BASE_URL = process.env.NEXT_PUBLIC_SUNT_CRM_URL;
 
+/**
+ * Modelo da URL da ficha, com `{leadId}` onde entra o id.
+ * Ex.: `https://litoral-leads.lovable.app/app/leads/{leadId}`
+ *
+ * POR QUE ISTO E CONFIGURAVEL e nao um caminho fixo: o CRM e um app React de
+ * rotas do lado do cliente. Toda URL responde 200 com a mesma casca — inclusive
+ * as que nao existem —, entao um caminho errado nao da 404: leva o operador
+ * para uma tela em branco. Era o que acontecia: o codigo cravava `/leads/{id}`,
+ * mas o app usa prefixo `/app/` (visto no link de aceite que o n8n manda).
+ *
+ * Como o padrao so pode ser confirmado por quem abre o CRM, ele vira
+ * configuracao: ajustar e trocar uma variavel de ambiente, sem mexer em codigo.
+ * Enquanto nao estiver definido, o botao leva para a HOME do CRM — menos
+ * direto, mas nunca quebrado.
+ */
+const CRM_LEAD_URL_TEMPLATE = process.env.NEXT_PUBLIC_SUNT_CRM_LEAD_URL;
+
 function crmLeadUrl(leadId: string): string | null {
+  if (CRM_LEAD_URL_TEMPLATE?.includes("{leadId}")) {
+    return CRM_LEAD_URL_TEMPLATE.replace("{leadId}", encodeURIComponent(leadId));
+  }
   if (!CRM_BASE_URL) return null;
-  return `${CRM_BASE_URL.replace(/\/+$/, "")}/leads/${leadId}`;
+  return CRM_BASE_URL.replace(/\/+$/, "");
 }
 
 interface LeadSidebarProps {
