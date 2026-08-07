@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { resolvePublicBaseUrl } from '@/lib/base-url'
 
 /**
  * Troca o `code` do e-mail por uma sessão e segue para `next`.
@@ -33,18 +34,23 @@ export async function GET(request: Request) {
   const code = url.searchParams.get('code')
   const next = destinoSeguro(url.searchParams.get('next'))
 
+  // NAO usar `url.origin`: atras do proxy do Coolify ele e `https://localhost:3000`,
+  // o host interno do contêiner. Foi exatamente esse o defeito — o link de
+  // redefinicao levava a localhost e o navegador dava ERR_CONNECTION_REFUSED.
+  const base = resolvePublicBaseUrl(request, url.origin, '[auth/callback]')
+
   // O Supabase manda `error_description` quando o link expirou ou já foi usado.
   // Devolver ao login com o motivo é melhor que um 404 mudo, que foi o que o
   // Robert viu.
   const erroExterno = url.searchParams.get('error_description')
   if (erroExterno) {
     return NextResponse.redirect(
-      new URL(`/login?erro=${encodeURIComponent(erroExterno)}`, url.origin),
+      new URL(`/login?erro=${encodeURIComponent(erroExterno)}`, base),
     )
   }
 
   if (!code) {
-    return NextResponse.redirect(new URL('/login?erro=link_invalido', url.origin))
+    return NextResponse.redirect(new URL('/login?erro=link_invalido', base))
   }
 
   const supabase = await createClient()
@@ -53,8 +59,8 @@ export async function GET(request: Request) {
   if (error) {
     // Só o nome do erro no log: a mensagem do Supabase pode ecoar parte do link.
     console.error('[auth/callback] falha ao trocar o code por sessão:', error.name)
-    return NextResponse.redirect(new URL('/login?erro=link_expirado', url.origin))
+    return NextResponse.redirect(new URL('/login?erro=link_expirado', base))
   }
 
-  return NextResponse.redirect(new URL(next, url.origin))
+  return NextResponse.redirect(new URL(next, base))
 }
