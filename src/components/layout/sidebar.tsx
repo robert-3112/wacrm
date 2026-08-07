@@ -8,23 +8,16 @@ import { useAuth } from "@/hooks/use-auth";
 import { useTotalUnread } from "@/hooks/use-total-unread";
 import { useUnreadNotifications } from "@/hooks/use-unread-notifications";
 import {
-  Bell,
-  Bot,
   Crown,
-  GitBranch,
   LayoutDashboard,
   LogOut,
   MessageSquare,
-  Radio,
   Settings,
   Shield,
   User,
   UserCog,
-  Users,
   UsersRound,
-  Workflow,
   X,
-  Zap,
 } from "lucide-react";
 import type { AccountRole } from "@/lib/auth/roles";
 
@@ -89,21 +82,30 @@ interface NavItem {
   beta?: boolean;
 }
 
-const navItems: NavItem[] = [
-  { href: "/dashboard", labelKey: "dashboard", icon: LayoutDashboard },
-  { href: "/inbox", labelKey: "inbox", icon: MessageSquare },
-  { href: "/notifications", labelKey: "notifications", icon: Bell },
-  { href: "/contacts", labelKey: "contacts", icon: Users },
-  { href: "/pipelines", labelKey: "pipelines", icon: GitBranch },
-  { href: "/broadcasts", labelKey: "broadcasts", icon: Radio },
-  { href: "/automations", labelKey: "automations", icon: Zap },
-  { href: "/flows", labelKey: "flows", icon: Workflow, beta: true },
-  { href: "/agents", labelKey: "aiAgents", icon: Bot },
-];
+/**
+ * MENU VAZIO DE PROPOSITO — o unico caminho e voltar para o painel da SUNT.
+ *
+ * As telas do fork WACRM (dashboard, inbox, contacts, pipelines, broadcasts,
+ * automations, flows, agents, settings) foram construidas sobre o modelo de
+ * dados DELE — `accounts`, `contacts`, `deals`, `pipelines`. A SUNT nao usa
+ * nenhuma dessas tabelas: aqui o mundo e `leads`, `corretores`,
+ * `empreendimentos`, `interacoes`, rodizio. As telas nao estao quebradas; elas
+ * consultam um banco que nesta instalacao esta vazio.
+ *
+ * O estrago de deixa-las no menu nao e estetico. `settings` tem uma aba
+ * "WhatsApp connection" que grava credenciais e aponta o webhook para
+ * `/api/whatsapp/webhook` — a rota do WACRM, que nao conhece `tenant_id` nem
+ * `leads`. Preencher aquilo redirecionaria os eventos da Meta para um
+ * processador que descarta tudo que interessa, e NENHUM lead seria atualizado.
+ * O canal oficial ja esta configurado em outro lugar; aquela tela so oferece
+ * uma forma de quebra-lo.
+ *
+ * As rotas continuam existindo e acessiveis por URL — nao removi codigo que nao
+ * e meu. Apenas ninguem e levado ate elas.
+ */
+const navItems: NavItem[] = [];
 
-const bottomNavItems = [
-  { href: "/settings", labelKey: "settings", icon: Settings },
-];
+const bottomNavItems: NavItem[] = [];
 
 interface SidebarProps {
   /** Controlled on mobile by the Header's hamburger button. Ignored on lg+. */

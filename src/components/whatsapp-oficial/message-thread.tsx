@@ -63,6 +63,9 @@ interface MessageThreadProps {
    *  `(dashboard-oficial)/whatsapp-oficial/inbox/page.tsx`), so this is the only way back
    *  without a browser-level back navigation. Rendered only when provided. */
   onBack?: () => void;
+  /** Repassado ao composer: com o envio real desligado a mensagem NÃO chega ao
+   *  cliente, e o operador precisa saber disso antes de digitar. */
+  envioReal: boolean;
 }
 
 export function MessageThread({
@@ -72,6 +75,7 @@ export function MessageThread({
   onMessageSent,
   onConversationChanged,
   onBack,
+  envioReal,
 }: MessageThreadProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
@@ -133,6 +137,7 @@ export function MessageThread({
         conversationId={conversation.id}
         disabled={composerDisabled}
         disabledReason={composerDisabledReason}
+        envioReal={envioReal}
         onSent={onMessageSent}
       />
 
