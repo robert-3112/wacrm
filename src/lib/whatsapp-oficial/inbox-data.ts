@@ -38,13 +38,32 @@ import type {
  * `name`). Select both and coalesce here rather than guessing which one a
  * given lead has populated.
  */
+/**
+ * A CHAVE ESTRANGEIRA E NOMEADA DE PROPOSITO — sem isso o inbox nao carrega.
+ *
+ * `leads.corretor_id` tem DUAS foreign keys para `corretores` em producao:
+ *   leads_corretor_id_fkey            FOREIGN KEY (corretor_id) REFERENCES corretores(id)
+ *   leads_corretor_id_tenant_fkey_os  FOREIGN KEY (tenant_id, corretor_id)
+ *                                       REFERENCES corretores(tenant_id, id)
+ *
+ * Com mais de um caminho possivel o PostgREST nao adivinha: recusa a consulta
+ * inteira com PGRST201 ("more than one relationship was found"). O sintoma nao e
+ * "o corretor veio vazio" — e a lista de conversas INTEIRA falhando, com a tela
+ * mostrando "Nao foi possivel carregar as conversas" enquanto os dados estao
+ * intactos no banco. Foi exatamente o que aconteceu no primeiro acesso real.
+ *
+ * Escolhida a composta (`_os`), nao a simples: ela casa `tenant_id` junto, entao
+ * o join nunca pode trazer corretor de outro tenant. A simples e redundante —
+ * esta implicada pela composta — mas derrubar constraint de tabela central por
+ * causa de uma consulta seria consertar no lugar errado.
+ */
 export const CONVERSATION_SELECT = `
   id, tenant_id, canal_id, lead_id, wa_contact_name, status, optout_em,
   ultima_mensagem_em, ultima_mensagem_preview, nao_lidas_corretor, created_at,
   lead:leads (
     id, nome, name, whatsapp, phone, etapa, temperatura, urgente,
     empreendimento_interesse_slug, corretor_id, status,
-    corretor:corretores ( id, nome )
+    corretor:corretores!leads_corretor_id_tenant_fkey_os ( id, nome )
   )
 `.trim()
 

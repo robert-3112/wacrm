@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { ROTA_INICIAL } from "@/lib/rotas";
 
 // --- Scenario knobs the mock reads -----------------------------------------
 // `mockUser`         — what getUser() resolves to (a refreshed session ⇒ user,
@@ -62,9 +63,12 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
       new NextRequest("https://app.test/login"),
     );
 
-    // Redirect to /dashboard…
+    // Redirect to the landing route — `/whatsapp-oficial/inbox` for this fork,
+    // not the upstream `/dashboard` (see `@/lib/rotas`). Asserted through the
+    // constant so the destination can move without this test going stale; what
+    // this test actually guards is the cookie below.
     expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toContain("/dashboard");
+    expect(res.headers.get("location")).toContain(ROTA_INICIAL);
     // …and the rotated cookie MUST ride along, otherwise the browser keeps
     // replaying the now-consumed refresh token and the session wedges until
     // the user manually clears cookies.
