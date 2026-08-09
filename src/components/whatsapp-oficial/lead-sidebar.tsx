@@ -36,7 +36,12 @@ import { addInternalNote } from "@/lib/whatsapp-oficial/inbox-actions";
 import { toast } from "sonner";
 import type { WhatsAppConversation, WhatsAppInternalNote } from "@/types/whatsapp-oficial";
 
-/** Base URL do CRM da SUNT (app Lovable), que é dono da ficha completa do lead. */
+/**
+ * Base URL do CRM da SUNT (app Lovable), que é dono da ficha completa do lead.
+ *
+ * ATENCAO: variavel NEXT_PUBLIC_* e inlinada no bundle durante o `next build`
+ * — trocar o valor exige REBUILD do app, nao basta reiniciar o processo.
+ */
 const CRM_BASE_URL = process.env.NEXT_PUBLIC_SUNT_CRM_URL;
 
 /**
@@ -50,9 +55,10 @@ const CRM_BASE_URL = process.env.NEXT_PUBLIC_SUNT_CRM_URL;
  * mas o app usa prefixo `/app/` (visto no link de aceite que o n8n manda).
  *
  * Como o padrao so pode ser confirmado por quem abre o CRM, ele vira
- * configuracao: ajustar e trocar uma variavel de ambiente, sem mexer em codigo.
- * Enquanto nao estiver definido, o botao leva para a HOME do CRM — menos
- * direto, mas nunca quebrado.
+ * configuracao: ajustar e trocar a variavel de ambiente E REBUILDAR o app
+ * (NEXT_PUBLIC_* e congelado no build, nao lido em runtime), sem mexer em
+ * codigo. Enquanto nao estiver definido, o botao leva para a HOME do CRM —
+ * menos direto, mas nunca quebrado.
  */
 const CRM_LEAD_URL_TEMPLATE = process.env.NEXT_PUBLIC_SUNT_CRM_LEAD_URL;
 
@@ -171,7 +177,8 @@ function LeadDetailsPanel({ conversation }: { conversation: WhatsAppConversation
             </a>
           ) : (
             <p className="text-center text-[10px] text-muted-foreground">
-              Link do CRM não configurado (NEXT_PUBLIC_SUNT_CRM_URL).
+              Link do CRM não configurado (NEXT_PUBLIC_SUNT_CRM_LEAD_URL ou
+              NEXT_PUBLIC_SUNT_CRM_URL).
             </p>
           )
         )}

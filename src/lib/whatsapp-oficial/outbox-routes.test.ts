@@ -153,22 +153,46 @@ describe('GET /api/whatsapp-oficial/outbox/metrics', () => {
     expect(res.status).toBe(401)
   })
 
-  it('aggregates counts correctly from fake rows', async () => {
+  it('conta NO BANCO (head+count) — os totais vêm do `count`, nunca de linhas varridas em JS', async () => {
+    // A versão antiga selecionava a tabela inteira e somava em memória; o
+    // PostgREST corta em `db-max-rows` (1000), então acima disso contava
+    // errado em silêncio. Os counts abaixo passam de 1000 de propósito: se a
+    // rota voltar a contar linhas transferidas, este teste quebra.
     vi.stubEnv('WHATSAPP_OUTBOX_CRON_SECRET', CRON_SECRET)
 
     const now = Date.now()
-    const rows = [
-      { status: 'pendente', created_at: new Date(now - 60_000).toISOString(), attempts: 0, dead_letter_at: null },
-      { status: 'pendente', created_at: new Date(now - 5_000).toISOString(), attempts: 1, dead_letter_at: null },
-      { status: 'falhou', created_at: new Date(now - 120_000).toISOString(), attempts: 2, dead_letter_at: null },
-      { status: 'simulado', created_at: new Date(now).toISOString(), attempts: 0, dead_letter_at: null },
-      { status: 'morto', created_at: new Date(now).toISOString(), attempts: 5, dead_letter_at: new Date(now).toISOString() },
-      { status: 'enviado', created_at: new Date(now).toISOString(), attempts: 1, dead_letter_at: null },
-    ]
+    const countsPorStatus: Record<string, number> = {
+      pendente: 1500,
+      processando: 3,
+      falhou: 7,
+      simulado: 2400,
+      morto: 11,
+      enviado: 9000,
+    }
+    const deadLetterCount = 11
+    const oldestRows = [{ created_at: new Date(now - 120_000).toISOString() }]
 
     mocks.supabaseAdmin.mockReturnValue({
       from: vi.fn(() => ({
-        select: vi.fn().mockResolvedValue({ data: rows, error: null }),
+        select: vi.fn((_cols: string, opts?: { count?: string; head?: boolean }) => {
+          if (opts?.head === true && opts.count === 'exact') {
+            return {
+              // contagem por status
+              eq: vi.fn((_col: string, status: string) =>
+                Promise.resolve({ count: countsPorStatus[status] ?? 0, error: null }),
+              ),
+              // contagem de dead-letter (dead_letter_at not is null)
+              not: vi.fn(() => Promise.resolve({ count: deadLetterCount, error: null })),
+            }
+          }
+          // pendente/falhou mais antigo: .in().order().limit(1)
+          const q = {
+            in: vi.fn(() => q),
+            order: vi.fn(() => q),
+            limit: vi.fn(() => Promise.resolve({ data: oldestRows, error: null })),
+          }
+          return q
+        }),
       })),
     })
 
@@ -179,18 +203,49 @@ describe('GET /api/whatsapp-oficial/outbox/metrics', () => {
 
     expect(res.status).toBe(200)
     expect(json.depthByStatus).toEqual({
-      pendente: 2,
-      processando: 0,
-      enviado: 1,
-      falhou: 1,
-      morto: 1,
-      simulado: 1,
+      pendente: 1500,
+      processando: 3,
+      enviado: 9000,
+      falhou: 7,
+      morto: 11,
+      simulado: 2400,
     })
-    expect(json.deadLetterTotal).toBe(1)
-    expect(json.attemptsSum).toBe(9)
-    // oldest waiting among pendente/falhou is the one 120s ago
+    expect(json.deadLetterTotal).toBe(11)
+    // o mais antigo entre pendente/falhou está 120s no passado
     expect(json.oldestPendingAgeSeconds).toBeGreaterThanOrEqual(119)
     expect(json.mode).toBe('shadow')
+  })
+
+  it('fila vazia: oldestPendingAgeSeconds é null, não 0', async () => {
+    vi.stubEnv('WHATSAPP_OUTBOX_CRON_SECRET', CRON_SECRET)
+
+    mocks.supabaseAdmin.mockReturnValue({
+      from: vi.fn(() => ({
+        select: vi.fn((_cols: string, opts?: { count?: string; head?: boolean }) => {
+          if (opts?.head === true) {
+            return {
+              eq: vi.fn(() => Promise.resolve({ count: 0, error: null })),
+              not: vi.fn(() => Promise.resolve({ count: 0, error: null })),
+            }
+          }
+          const q = {
+            in: vi.fn(() => q),
+            order: vi.fn(() => q),
+            limit: vi.fn(() => Promise.resolve({ data: [], error: null })),
+          }
+          return q
+        }),
+      })),
+    })
+
+    const res = await metricsRoute.GET(
+      makeRequest({ headers: { 'x-cron-secret': CRON_SECRET } }),
+    )
+    const json = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(json.oldestPendingAgeSeconds).toBeNull()
+    expect(json.deadLetterTotal).toBe(0)
   })
 })
 

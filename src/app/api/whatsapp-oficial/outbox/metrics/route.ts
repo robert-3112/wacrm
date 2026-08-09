@@ -4,10 +4,12 @@
  * operational telemetry, not a public status page — it exposes queue
  * shape, not message content).
  *
- * Deliberately avoids a dedicated aggregate RPC: pulls the small set of
- * columns needed (`status, created_at, attempts, dead_letter_at`) and
- * reduces them in JS. Never selects or returns `payload`, phone numbers,
- * or any message content.
+ * Conta NO BANCO (`count: 'exact', head: true`), nunca em JS sobre linhas
+ * transferidas: o PostgREST corta qualquer select de linhas no `db-max-rows`
+ * (1000 no default do Supabase), então a versão anterior — varrer a tabela e
+ * somar em memória — mentia silenciosamente a partir da 1001ª linha. Mesmo
+ * motivo do teto paginado documentado em `campanhas/[id]/route.ts`. Nada aqui
+ * seleciona ou devolve `payload`, telefone ou conteúdo de mensagem.
  */
 
 import { timingSafeEqual } from 'node:crypto'
@@ -25,13 +27,6 @@ const TRACKED_STATUSES: OutboxStatus[] = [
   'morto',
   'enviado',
 ]
-
-interface MetricsRow {
-  status: string
-  created_at: string
-  attempts: number | null
-  dead_letter_at: string | null
-}
 
 function isAuthorized(request: Request): boolean | 'not_configured' {
   const expected = process.env.WHATSAPP_OUTBOX_CRON_SECRET
@@ -57,61 +52,58 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
 
   const admin = supabaseAdmin()
-  const { data, error } = await admin
-    .from('whatsapp_outbox')
-    .select('status, created_at, attempts, dead_letter_at')
 
-  if (error) {
-    console.error('[whatsapp-oficial/outbox/metrics] query failed:', error.message)
+  try {
+    // Uma consulta head+count por status, mais dead-letter e o pendente mais
+    // antigo — 8 idas leves ao banco em paralelo, zero linhas transferidas.
+    const [contagens, deadLetter, maisAntiga] = await Promise.all([
+      Promise.all(
+        TRACKED_STATUSES.map(async (status) => {
+          const { count, error } = await admin
+            .from('whatsapp_outbox')
+            .select('id', { count: 'exact', head: true })
+            .eq('status', status)
+          if (error) throw error
+          return [status, count ?? 0] as const
+        }),
+      ),
+      admin
+        .from('whatsapp_outbox')
+        .select('id', { count: 'exact', head: true })
+        .not('dead_letter_at', 'is', null),
+      admin
+        .from('whatsapp_outbox')
+        .select('created_at')
+        .in('status', ['pendente', 'falhou'])
+        .order('created_at', { ascending: true })
+        .limit(1),
+    ])
+    if (deadLetter.error) throw deadLetter.error
+    if (maisAntiga.error) throw maisAntiga.error
+
+    const depthByStatus = Object.fromEntries(contagens) as Record<OutboxStatus, number>
+
+    const oldestRow = ((maisAntiga.data ?? []) as Array<{ created_at: string }>)[0]
+    const oldestMs = oldestRow ? new Date(oldestRow.created_at).getTime() : NaN
+    const oldestPendingAgeSeconds = Number.isNaN(oldestMs)
+      ? null
+      : Math.max(0, Math.floor((Date.now() - oldestMs) / 1000))
+
+    const flags = readWhatsappFlags()
+
+    return NextResponse.json({
+      depthByStatus,
+      oldestPendingAgeSeconds,
+      deadLetterTotal: deadLetter.count ?? 0,
+      mode: flags.mode,
+      providersEnabled: {
+        meta_cloud: isSendEnabledFor('meta_cloud', flags),
+        evolution: isSendEnabledFor('evolution', flags),
+      },
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[whatsapp-oficial/outbox/metrics] query failed:', message)
     return NextResponse.json({ error: 'outbox_metrics_failed' }, { status: 500 })
   }
-
-  const rows = (data ?? []) as MetricsRow[]
-
-  const depthByStatus: Record<OutboxStatus, number> = {
-    pendente: 0,
-    processando: 0,
-    enviado: 0,
-    falhou: 0,
-    morto: 0,
-    simulado: 0,
-  }
-
-  let deadLetterTotal = 0
-  let attemptsSum = 0
-  let oldestWaitingMs: number | null = null
-
-  for (const row of rows) {
-    if (TRACKED_STATUSES.includes(row.status as OutboxStatus)) {
-      depthByStatus[row.status as OutboxStatus] += 1
-    }
-    if (row.dead_letter_at) {
-      deadLetterTotal += 1
-    }
-    attemptsSum += row.attempts ?? 0
-
-    if (row.status === 'pendente' || row.status === 'falhou') {
-      const createdMs = new Date(row.created_at).getTime()
-      if (!Number.isNaN(createdMs) && (oldestWaitingMs === null || createdMs < oldestWaitingMs)) {
-        oldestWaitingMs = createdMs
-      }
-    }
-  }
-
-  const oldestPendingAgeSeconds =
-    oldestWaitingMs === null ? null : Math.max(0, Math.floor((Date.now() - oldestWaitingMs) / 1000))
-
-  const flags = readWhatsappFlags()
-
-  return NextResponse.json({
-    depthByStatus,
-    oldestPendingAgeSeconds,
-    deadLetterTotal,
-    attemptsSum,
-    mode: flags.mode,
-    providersEnabled: {
-      meta_cloud: isSendEnabledFor('meta_cloud', flags),
-      evolution: isSendEnabledFor('evolution', flags),
-    },
-  })
 }

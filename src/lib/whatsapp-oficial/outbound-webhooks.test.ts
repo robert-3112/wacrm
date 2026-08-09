@@ -337,7 +337,9 @@ describe('deliverWebhook', () => {
   })
 
   it('achata quebra de linha e caractere de controle vindos do destino', async () => {
-    const { impl } = makeFetchSpy(() => okResponse('linha1\n\n\tlinha2 fim', 422))
+    // NUL escrito como escape ('\u0000'), nunca como byte literal: o byte cru
+    // fazia grep/diff tratarem este arquivo como binário.
+    const { impl } = makeFetchSpy(() => okResponse('linha1\n\n\tlinha2\u0000fim', 422))
     const r = await deliverWebhook({
       url: URL_DESTINO,
       secret: SEGREDO,

@@ -1,8 +1,15 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
-import { ROTA_INICIAL, ROTAS_PROTEGIDAS } from '@/lib/rotas'
+import { ROTA_INICIAL, ROTAS_PROTEGIDAS, isRotaMorta } from '@/lib/rotas'
 
 export async function middleware(request: NextRequest) {
+  // Superfície herdada do WACRM que este fork matou (ver ROTAS_MORTAS em
+  // `@/lib/rotas`): 404 seco, para todo mundo, ANTES de tocar no Supabase —
+  // rota morta não merece nem o custo de validar sessão.
+  if (isRotaMorta(request.nextUrl.pathname)) {
+    return new NextResponse(null, { status: 404 })
+  }
+
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(
@@ -49,18 +56,15 @@ export async function middleware(request: NextRequest) {
   // they can accept the invitation in one click. Without this,
   // a forwarded invite link to someone who's already signed in
   // would silently drop them on /dashboard.
+  // (`/signup` saiu daqui: é rota morta — 404 no topo, antes desta função
+  // sequer consultar sessão.)
   if (user && (
     request.nextUrl.pathname === '/login' ||
-    request.nextUrl.pathname === '/signup' ||
     request.nextUrl.pathname === '/forgot-password'
   )) {
     const url = request.nextUrl.clone()
     const inviteToken = request.nextUrl.searchParams.get('invite')
-    if (
-      inviteToken &&
-      (request.nextUrl.pathname === '/login' ||
-        request.nextUrl.pathname === '/signup')
-    ) {
+    if (inviteToken && request.nextUrl.pathname === '/login') {
       url.pathname = `/join/${encodeURIComponent(inviteToken)}`
       url.search = ''
     } else {
@@ -77,14 +81,8 @@ export async function middleware(request: NextRequest) {
     return withRefreshedCookies(NextResponse.redirect(url))
   }
 
-  // API routes that need auth (not webhooks)
-  if (!user && request.nextUrl.pathname.startsWith('/api/whatsapp/') &&
-      !request.nextUrl.pathname.includes('/webhook')) {
-    return withRefreshedCookies(
-      NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    )
-  }
-
+  // (O branch de 401 para `/api/whatsapp/` foi removido: o prefixo inteiro é
+  // rota morta e já respondeu 404 lá no topo.)
   return supabaseResponse
 }
 

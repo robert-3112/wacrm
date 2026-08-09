@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { ROTA_INICIAL } from "@/lib/rotas";
+import { ROTA_INICIAL, ROTAS_MORTAS } from "@/lib/rotas";
 
 // --- Scenario knobs the mock reads -----------------------------------------
 // `mockUser`         — what getUser() resolves to (a refreshed session ⇒ user,
@@ -82,7 +82,7 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     refreshedCookies = [{ ...ROTATED, value: "cleared" }];
 
     const res = await middleware(
-      new NextRequest("https://app.test/dashboard"),
+      new NextRequest(`https://app.test${ROTA_INICIAL}`),
     );
 
     expect(res.status).toBe(307);
@@ -107,11 +107,57 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     refreshedCookies = [ROTATED];
 
     const res = await middleware(
-      new NextRequest("https://app.test/dashboard"),
+      new NextRequest(`https://app.test${ROTA_INICIAL}`),
     );
 
     // No redirect — the normal NextResponse.next() already carries cookies.
     expect(res.headers.get("location")).toBeNull();
     expect(res.cookies.get(ROTATED.name)?.value).toBe(ROTATED.value);
+  });
+});
+
+describe("middleware — superfície herdada do WACRM responde 404", () => {
+  // Cada rota morta E um descendente dela — a lista inclui `/api/whatsapp`,
+  // cujo webhook (`/api/whatsapp/webhook`) escreveria com service_role numa
+  // tabela que colide com a da Sophia; o 404 tem de valer para o prefixo
+  // INTEIRO, sem exceção para o webhook.
+  const casos = ROTAS_MORTAS.flatMap((rota) => [rota, `${rota}/qualquer-coisa`]);
+
+  it.each(casos)("%s responde 404 mesmo com sessão válida", async (pathname) => {
+    mockUser = { id: "user-1" };
+
+    const res = await middleware(new NextRequest(`https://app.test${pathname}`));
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it.each(casos)("%s responde 404 também sem sessão (nada de redirect p/ login)", async (pathname) => {
+    mockUser = null;
+
+    const res = await middleware(new NextRequest(`https://app.test${pathname}`));
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("o hífen não é capturado: /api/whatsapp-oficial NÃO é rota morta", async () => {
+    // `/api/whatsapp` mata `/api/whatsapp` e `/api/whatsapp/...`, nunca
+    // `/api/whatsapp-oficial/...` — o canal oficial vive.
+    mockUser = { id: "user-1" };
+
+    const res = await middleware(
+      new NextRequest("https://app.test/api/whatsapp-oficial/health"),
+    );
+
+    expect(res.status).not.toBe(404);
+  });
+
+  it("a página do fork continua viva", async () => {
+    mockUser = { id: "user-1" };
+
+    const res = await middleware(new NextRequest(`https://app.test${ROTA_INICIAL}`));
+
+    expect(res.status).toBe(200);
   });
 });

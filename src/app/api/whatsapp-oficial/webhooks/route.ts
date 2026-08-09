@@ -68,23 +68,31 @@ export async function GET(): Promise<Response> {
   try {
     const { userId, supabaseUser } = await requireGestaoSession()
 
+    // Orçamento de LEITURA — o de escrita (campanhaWrite) é apertado de
+    // propósito e uma tela recarregando a lista não pode consumi-lo.
     const rl = checkRateLimit(
       `whatsapp-oficial-webhooks-list:${userId}`,
-      WHATSAPP_OFICIAL_RATE_LIMITS.campanhaWrite,
+      WHATSAPP_OFICIAL_RATE_LIMITS.gestaoList,
     )
     if (!rl.success) return rateLimitResponse(rl)
 
+    // Uma linha além do teto só para saber se ele cortou algo — mesmo critério
+    // da lista de campanhas. A linha espiada nunca sai na resposta.
     const { data, error } = await supabaseUser
       .from('whatsapp_outbound_webhooks')
       .select(LISTA_SELECT)
       .order('created_at', { ascending: false })
-      .limit(LISTA_MAX_LINHAS)
+      .limit(LISTA_MAX_LINHAS + 1)
 
     if (error) throw error
 
+    const linhas = data ?? []
+    const truncado = linhas.length > LISTA_MAX_LINHAS
+
     return NextResponse.json({
       ok: true,
-      webhooks: data ?? [],
+      webhooks: truncado ? linhas.slice(0, LISTA_MAX_LINHAS) : linhas,
+      truncado,
       eventos_disponiveis: WEBHOOK_EVENTOS,
     })
   } catch (error) {

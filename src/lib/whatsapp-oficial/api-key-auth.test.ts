@@ -227,7 +227,8 @@ describe('vazao por chave', () => {
       toApiV1Response(e),
     )
     expect((res as Response).status).toBe(429)
-    expect((res as Response).headers.get('Retry-After')).toBeTruthy()
+    // Segundos inteiros, como o RFC pede — `toBeTruthy()` aceitaria "NaN".
+    expect((res as Response).headers.get('Retry-After')).toMatch(/^\d+$/)
     expect((await corpo(res as Response)).error).toBe('rate_limited')
   })
 
@@ -271,7 +272,8 @@ describe('vazao por origem', () => {
       if (res) {
         expect(res.status).toBe(429)
         expect((await corpo(res)).error).toBe('rate_limited')
-        expect(res.headers.get('Retry-After')).toBeTruthy()
+        // Segundos inteiros, como o RFC pede — `toBeTruthy()` aceitaria "NaN".
+        expect(res.headers.get('Retry-After')).toMatch(/^\d+$/)
         bloqueadaEm = i
         break
       }

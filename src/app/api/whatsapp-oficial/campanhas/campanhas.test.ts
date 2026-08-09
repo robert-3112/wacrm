@@ -208,6 +208,42 @@ describe('GET /api/whatsapp-oficial/campanhas', () => {
     expect((await listaRoute.GET(getRequest('?status=enviando_agora'))).status).toBe(422)
     expect((await listaRoute.GET(getRequest('?canalId=nao-e-uuid'))).status).toBe(422)
   })
+
+  it('acima do teto avisa `truncado: true` e a linha espiada não sai na resposta', async () => {
+    // A rota pede teto+1 linhas só para saber se o corte aconteceu — antes o
+    // teto cortava em silêncio e a tela jurava que a base inteira eram 100
+    // campanhas.
+    const linhas = Array.from({ length: 101 }, (_, i) => ({ id: `c-${i}` }))
+    autenticado(makeAdmin(), { from: vi.fn(() => makeQuery({ data: linhas, error: null })) })
+
+    const res = await listaRoute.GET(getRequest())
+    const json = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(json.truncado).toBe(true)
+    expect(json.campanhas).toHaveLength(100)
+  })
+
+  it('exatamente no teto NÃO é truncado', async () => {
+    const linhas = Array.from({ length: 100 }, (_, i) => ({ id: `c-${i}` }))
+    autenticado(makeAdmin(), { from: vi.fn(() => makeQuery({ data: linhas, error: null })) })
+
+    const json = await (await listaRoute.GET(getRequest())).json()
+
+    expect(json.truncado).toBe(false)
+    expect(json.campanhas).toHaveLength(100)
+  })
+
+  it('a lista tem orçamento PRÓPRIO de leitura (60/min), não o de escrita (20/min)', async () => {
+    // Regressão: o GET gastava o balde de campanhaWrite — a 21ª recarga da
+    // tela num minuto tomava 429 sem ninguém ter escrito nada.
+    autenticado(makeAdmin(), { from: vi.fn(() => makeQuery({ data: [], error: null })) })
+
+    for (let i = 0; i < 60; i += 1) {
+      expect((await listaRoute.GET(getRequest())).status).toBe(200)
+    }
+    expect((await listaRoute.GET(getRequest())).status).toBe(429)
+  })
 })
 
 // ------------------------------------------------------ POST /campanhas

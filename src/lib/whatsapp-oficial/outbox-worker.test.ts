@@ -250,6 +250,19 @@ describe('processOutboxBatch — live success', () => {
 
     expect(messages['msg-1']).toMatchObject({ status: 'enviada', wamid: 'wamid.REAL123' })
 
+    // A ORDEM é contrato: a mensagem grava antes da fila. Um crash entre as
+    // duas escritas cai na barreira (b) no re-claim (mensagem terminal →
+    // outbox 'enviado', sem reenvio); na ordem inversa o crash deixa
+    // outbox='enviado' com a mensagem 'pendente', estado que nada cobre.
+    const idxMensagem = calls.findIndex(
+      (c) => c.table === 'whatsapp_messages' && c.op === 'update',
+    )
+    const idxFila = calls.findIndex(
+      (c) => c.table === 'whatsapp_outbox' && c.op === 'update' && c.values?.status === 'enviado',
+    )
+    expect(idxMensagem).toBeGreaterThanOrEqual(0)
+    expect(idxFila).toBeGreaterThan(idxMensagem)
+
     const audits = auditInserts(calls)
     expect(audits[0].values).toMatchObject({ decisao: 'enviado' })
     expect(audits[0].values?.detalhe).toMatchObject({ provider_message_id: 'wamid.REAL123' })
@@ -264,19 +277,25 @@ describe('processOutboxBatch — live failure', () => {
       messages: { 'msg-1': { status: 'pendente' } },
     })
     const flags = makeFlags({ mode: 'live' })
+    const now = new Date('2026-07-24T12:00:00Z')
     vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
     vi.mocked(adapterMock.send).mockRejectedValue(
       Object.assign(new Error('server error'), { httpStatus: 500 }),
     )
 
-    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1', now })
 
     expect(result.retried).toBe(1)
     expect(result.deadLettered).toBe(0)
 
     const outboxUpdate = outboxUpdates(calls)
     expect(outboxUpdate[0].values).toMatchObject({ status: 'falhou' })
-    expect(outboxUpdate[0].values?.next_retry_at).toBeDefined()
+    // Primeira falha (attempts 0): backoff de 30s com full jitter [0.5, 1] —
+    // o retry cai entre now+15s e now+30s. `toBeDefined()` deixava passar um
+    // next_retry_at = now (spin) ou = now+6h (mensagem esquecida).
+    const nextRetryMs = new Date(String(outboxUpdate[0].values?.next_retry_at)).getTime()
+    expect(nextRetryMs).toBeGreaterThanOrEqual(now.getTime() + 15_000)
+    expect(nextRetryMs).toBeLessThanOrEqual(now.getTime() + 30_000)
     expect(outboxUpdate[0].values?.dead_letter_at).toBeUndefined()
 
     expect(messages['msg-1'].status).toBe('pendente')
@@ -290,19 +309,23 @@ describe('processOutboxBatch — live failure', () => {
       messages: { 'msg-1': { status: 'pendente' } },
     })
     const flags = makeFlags({ mode: 'live' })
+    const now = new Date('2026-07-24T12:00:00Z')
     vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
     vi.mocked(adapterMock.send).mockRejectedValue(
       Object.assign(new Error('undeliverable'), { code: 131026 }),
     )
 
-    const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1', now })
 
     expect(result.deadLettered).toBe(1)
     expect(result.retried).toBe(0)
 
     const outboxUpdate = outboxUpdates(calls)
-    expect(outboxUpdate[0].values).toMatchObject({ status: 'morto' })
-    expect(outboxUpdate[0].values?.dead_letter_at).toBeDefined()
+    expect(outboxUpdate[0].values).toMatchObject({
+      status: 'morto',
+      // dead-letter carimba o instante da decisão, não um valor qualquer
+      dead_letter_at: now.toISOString(),
+    })
 
     expect(messages['msg-1']).toMatchObject({ status: 'falhou', erro_code: '131026' })
     expect(auditInserts(calls)[0].values).toMatchObject({ decisao: 'falha_permanente' })

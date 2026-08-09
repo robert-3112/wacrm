@@ -390,13 +390,20 @@ async function handleJob(
 
   try {
     const result = await adapter.send({ job, credential })
-    await applyOutboxSuccess(admin, { id: job.outbox_id }, now)
+    // A MENSAGEM grava antes da FILA, de propósito: se o processo cair entre
+    // as duas escritas, o job fica 'processando', o lease expira, o re-claim
+    // encontra a mensagem já terminal e a barreira (b) marca o outbox como
+    // 'enviado' SEM reenviar ao cliente. Na ordem inversa (fila primeiro), o
+    // crash deixava outbox='enviado' com a mensagem presa em 'pendente' —
+    // estado que nenhuma barreira cobre e que um reenfileiramento manual
+    // transformaria em mensagem duplicada para uma pessoa real.
     if (job.message_id) {
       await updateMessage(admin, job.message_id, {
         status: 'enviada',
         wamid: result.providerMessageId,
       })
     }
+    await applyOutboxSuccess(admin, { id: job.outbox_id }, now)
     await registrarAuditoria(admin, {
       job,
       flags,

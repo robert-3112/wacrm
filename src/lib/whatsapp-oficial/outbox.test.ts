@@ -74,28 +74,41 @@ function makeSupabaseMock() {
 describe('applyOutboxFailure', () => {
   it('schedules a retry (status=falhou, next_retry_at set) for a retryable error under budget', async () => {
     const { supabase, updateCalls } = makeSupabaseMock()
+    const now = new Date('2026-01-01T00:00:00Z')
     const result = await applyOutboxFailure(
       supabase,
       { id: 'ob-1', attempts: 0, max_attempts: 5 },
       { httpStatus: 500, message: 'server error' },
+      now,
     )
     expect(result).toEqual({ errorClass: 'retryable', deadLettered: false })
     expect(updateCalls).toHaveLength(1)
     expect(updateCalls[0].values).toMatchObject({ status: 'falhou', attempts: 1 })
-    expect(updateCalls[0].values.next_retry_at).toBeDefined()
+    // Primeira falha: base 30s com full jitter [0.5, 1] — retry entre now+15s
+    // e now+30s. `toBeDefined()` aceitava tanto retry imediato (spin) quanto
+    // um carimbo de 6h que esquece a mensagem.
+    const nextRetryMs = new Date(String(updateCalls[0].values.next_retry_at)).getTime()
+    expect(nextRetryMs).toBeGreaterThanOrEqual(now.getTime() + 15_000)
+    expect(nextRetryMs).toBeLessThanOrEqual(now.getTime() + 30_000)
     expect(updateCalls[0].values.dead_letter_at).toBeUndefined()
   })
 
   it('dead-letters immediately on a permanent error, even on the first attempt', async () => {
     const { supabase, updateCalls } = makeSupabaseMock()
+    const now = new Date('2026-01-01T00:00:00Z')
     const result = await applyOutboxFailure(
       supabase,
       { id: 'ob-2', attempts: 0, max_attempts: 5 },
       { code: 131026, message: 'undeliverable' },
+      now,
     )
     expect(result).toEqual({ errorClass: 'permanent', deadLettered: true })
-    expect(updateCalls[0].values).toMatchObject({ status: 'morto', attempts: 1 })
-    expect(updateCalls[0].values.dead_letter_at).toBeDefined()
+    expect(updateCalls[0].values).toMatchObject({
+      status: 'morto',
+      attempts: 1,
+      // o carimbo é o instante da decisão, não um valor qualquer
+      dead_letter_at: now.toISOString(),
+    })
   })
 
   it('dead-letters a retryable error once the attempt budget is exhausted', async () => {

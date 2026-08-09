@@ -68,4 +68,13 @@ export const WHATSAPP_OFICIAL_RATE_LIMITS = {
    * tight budget also protects the database.
    */
   campanhaWrite: { limit: 20, windowMs: 60_000 },
+  /**
+   * Listagens de gestão (GET /campanhas, GET /webhooks), keyed by user id.
+   * Leitura tem orçamento próprio: os 20/min de `campanhaWrite` são
+   * calibrados para cliques deliberados de ciclo de vida, e uma tela que
+   * recarrega a lista (polling, F5, troca de filtro) estourava em minutos um
+   * teto pensado para ESCRITA. 60/min segue a mesma régua dos outros buckets
+   * de leitura (`mediaRelay`).
+   */
+  gestaoList: { limit: 60, windowMs: 60_000 },
 } as const

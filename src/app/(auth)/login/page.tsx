@@ -150,19 +150,9 @@ function LoginPageInner() {
             </Button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-muted-foreground">
-            {t('noAccount')}{" "}
-            <Link
-              href={
-                inviteToken
-                  ? `/signup?invite=${encodeURIComponent(inviteToken)}`
-                  : "/signup"
-              }
-              className="text-primary hover:text-primary/80"
-            >
-              {t('createAccount')}
-            </Link>
-          </p>
+          {/* O link "criar conta" saiu junto com o /signup (rota morta —
+              ver ROTAS_MORTAS em @/lib/rotas): conta aqui é provisionada
+              pela gestão, não por auto-cadastro. */}
         </CardContent>
       </Card>
     </div>

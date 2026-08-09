@@ -93,9 +93,11 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const { userId, supabaseUser } = await requireGestaoSession()
 
+    // Orçamento de LEITURA — o de escrita (campanhaWrite) é apertado de
+    // propósito e uma tela recarregando a lista não pode consumi-lo.
     const rl = checkRateLimit(
       `whatsapp-oficial-campanhas-list:${userId}`,
-      WHATSAPP_OFICIAL_RATE_LIMITS.campanhaWrite,
+      WHATSAPP_OFICIAL_RATE_LIMITS.gestaoList,
     )
     if (!rl.success) return rateLimitResponse(rl)
 
@@ -112,11 +114,14 @@ export async function GET(request: Request): Promise<Response> {
       return unprocessable('canal_invalido')
     }
 
+    // Pede UMA linha além do teto só para saber se ele cortou algo: `.limit(N)`
+    // cheio não distingue "exatamente N" de "havia mais" — mesmo critério do
+    // agregado em `[id]/route.ts`. A linha espiada nunca sai na resposta.
     let query = supabaseUser
       .from('whatsapp_broadcasts')
       .select(LISTA_SELECT)
       .order('created_at', { ascending: false })
-      .limit(LISTA_MAX_LINHAS)
+      .limit(LISTA_MAX_LINHAS + 1)
 
     if (status) query = query.eq('status', status)
     if (canalId) query = query.eq('canal_id', canalId)
@@ -124,7 +129,14 @@ export async function GET(request: Request): Promise<Response> {
     const { data, error } = await query
     if (error) throw error
 
-    return NextResponse.json({ ok: true, campanhas: data ?? [] })
+    const linhas = data ?? []
+    const truncado = linhas.length > LISTA_MAX_LINHAS
+
+    return NextResponse.json({
+      ok: true,
+      campanhas: truncado ? linhas.slice(0, LISTA_MAX_LINHAS) : linhas,
+      truncado,
+    })
   } catch (error) {
     return toErrorResponse(error)
   }

@@ -164,6 +164,25 @@ describe('GET /api/whatsapp-oficial/webhooks', () => {
     const res = await listaRoute.GET()
     expect(res.status).toBe(401)
   })
+
+  it('acima do teto avisa `truncado: true` e a linha espiada não sai na resposta', async () => {
+    const linhas = Array.from({ length: 101 }, (_, i) => ({ id: `w-${i}` }))
+    sessaoCom(makeAdmin(), makeQuery({ data: linhas, error: null }))
+
+    const json = await (await listaRoute.GET()).json()
+
+    expect(json.truncado).toBe(true)
+    expect(json.webhooks).toHaveLength(100)
+  })
+
+  it('a lista usa o orçamento de LEITURA: a 21ª recarga no minuto não toma 429', async () => {
+    // Regressão: o GET gastava o balde de campanhaWrite (20/min).
+    sessaoCom(makeAdmin())
+
+    for (let i = 0; i < 21; i += 1) {
+      expect((await listaRoute.GET()).status).toBe(200)
+    }
+  })
 })
 
 // -------------------------------------------------------------------- POST
