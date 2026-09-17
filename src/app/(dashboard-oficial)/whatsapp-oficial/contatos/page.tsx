@@ -6,6 +6,7 @@ import {
   ArrowRight,
   ExternalLink,
   MessageCircle,
+  Upload,
   Search,
   UsersRound,
 } from 'lucide-react';
@@ -58,6 +59,7 @@ export default async function ContatosPage({
 }) {
   const query = parseContactListQuery(await searchParams);
   const supabase = await createClient();
+  const { data: podeImportar } = await supabase.rpc('crm_is_admin_owner');
   const result = query.buscaInvalida
     ? { contatos: [], total: 0, erro: null }
     : await fetchHubContacts(supabase, query);
@@ -80,13 +82,24 @@ export default async function ContatosPage({
               acompanhe o responsável por cada contato.
             </p>
           </div>
-          <Link
-            href="/whatsapp-oficial/inbox"
-            className={cn(buttonVariants({ variant: 'outline' }), 'gap-2')}
-          >
-            <MessageCircle className="size-4" aria-hidden="true" />
-            Ir para conversas
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            {podeImportar === true && (
+              <Link
+                href="/whatsapp-oficial/contatos/importar"
+                className={cn(buttonVariants(), 'gap-2')}
+              >
+                <Upload className="size-4" aria-hidden="true" />
+                Importar CSV
+              </Link>
+            )}
+            <Link
+              href="/whatsapp-oficial/inbox"
+              className={cn(buttonVariants({ variant: 'outline' }), 'gap-2')}
+            >
+              <MessageCircle className="size-4" aria-hidden="true" />
+              Ir para conversas
+            </Link>
+          </div>
         </div>
 
         <form
