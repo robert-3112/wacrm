@@ -195,9 +195,9 @@ describe('buildSendComponents contra os formatos REAIS da Meta', () => {
 describe('TemplateBuildError é classificado como PERMANENTE pela fila', () => {
   /**
    * Esta é a asserção que dá sentido a todas as outras. Sem `httpStatus`, um `Error`
-   * pelado cai no último `return` de `classifyMetaError` — `unknown_error_default_retryable`
-   * — e o job é retentado 5 vezes com backoff de até 6h. Com 500 destinatários isso são
-   * 2.500 ciclos de worker ao longo de horas para um defeito que é determinístico.
+   * pelado não informa se o provedor aceitou a requisição e fica em quarentena
+   * como resultado incerto. O erro específico 422 registra a causa real de um
+   * defeito determinístico, sem sugerir reconciliação de envio.
    */
   const casos: Array<[string, () => unknown]> = [
     ['carrossel', () => buildSendComponents(REAIS.media_carousel)],
@@ -226,11 +226,11 @@ describe('TemplateBuildError é classificado como PERMANENTE pela fila', () => {
     })
   }
 
-  it('REGRESSAO: um Error pelado seria retentado — é o que estes throws eram antes', () => {
-    // Guarda de sentido: se alguém trocar TemplateBuildError por Error de novo, o teste
-    // acima quebra e este explica por quê.
+  it('REGRESSAO: um Error pelado fica incerto, sem mascarar o 422 específico', () => {
+    // Se alguém trocar TemplateBuildError por Error, o teste acima detecta a
+    // perda da classificação permanente e da causa específica.
     const veredito = classifyMetaError({ message: 'Body has 3 variable(s) but only 0 value(s)' })
-    expect(veredito.errorClass).toBe('retryable')
-    expect(veredito.reason).toBe('unknown_error_default_retryable')
+    expect(veredito.errorClass).toBe('uncertain')
+    expect(veredito.reason).toBe('resultado_incerto')
   })
 })

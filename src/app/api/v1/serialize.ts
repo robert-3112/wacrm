@@ -140,7 +140,7 @@ export function serializeContact(
  *
  * Fail-closed de propósito: só devolve `true` quando dá para PROVAR que os dois lados são o
  * mesmo tenant. Se qualquer um dos `tenant_id` vier vazio — alguém enxugou o SELECT, o embed
- * veio de outro caminho — a resposta perde o contato. Chato e visível; o contrário é silencioso
+ * veio de outro caminho — a resposta perde o contato e o lead_id. Chato e visível; o contrário é silencioso
  * e vaza o vizinho. (`a === b` com `a` provado string evita o buraco de `undefined === undefined`
  * passar por "mesmo tenant".)
  */
@@ -155,24 +155,24 @@ export function serializeConversation(
 ): Record<string, unknown> {
   const lead = firstOrSelf(raw.lead)
 
-  let contact: Record<string, unknown> | null = null
-  if (lead) {
-    if (mesmoTenant(raw, lead)) {
-      contact = serializeContact(lead, escopos)
-    } else if (typeof lead.tenant_id === 'string' && lead.tenant_id !== '') {
-      // Divergência real (os dois lados presentes e diferentes) é problema de integridade de
-      // dado, não caso de borda: registra sem nome nem telefone no log.
-      console.error(
-        '[api/v1/conversations] conversa aponta para lead de outro tenant:',
-        `conversation=${raw.id} conversa.tenant=${raw.tenant_id} lead.tenant=${lead.tenant_id}`,
-      )
-    }
+  // O FK simples pode apontar para lead de outro tenant. Nem o UUID do lead deve sair até
+  // confirmar tenant E vínculo com a conversa; o filtro do embed pode fazê-lo vir como null.
+  const linkedLead =
+    lead && typeof lead.id === 'string' && lead.id === raw.lead_id && mesmoTenant(raw, lead)
+      ? lead
+      : null
+  if (lead && !linkedLead && typeof lead.tenant_id === 'string' && lead.tenant_id !== '') {
+    // Divergência é problema de integridade: registra apenas ids/tenant, sem nome ou telefone.
+    console.error(
+      '[api/v1/conversations] conversa aponta para lead divergente:',
+      `conversation=${raw.id} conversa.tenant=${raw.tenant_id} lead.tenant=${lead.tenant_id}`,
+    )
   }
 
   const out: Record<string, unknown> = {
     id: raw.id,
     status: raw.status ?? null,
-    lead_id: raw.lead_id ?? null,
+    lead_id: linkedLead?.id ?? null,
     canal_id: raw.canal_id ?? null,
     // Quem consome a API precisa saber que a pessoa pediu para sair antes de tentar enviar.
     opted_out_at: raw.optout_em ?? null,
@@ -182,7 +182,7 @@ export function serializeConversation(
     // `/conversations/{id}/messages` — onde `messages:read` é conferido.
     last_message_at: raw.ultima_mensagem_em ?? null,
     created_at: raw.created_at,
-    contact,
+    contact: serializeContact(linkedLead, escopos),
   }
   if (escopos.includes('messages:read')) {
     out.last_message_preview = raw.ultima_mensagem_preview ?? null

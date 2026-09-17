@@ -16,6 +16,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 function jsonResponse(body: unknown, status = 200) {
@@ -93,6 +94,7 @@ describe('evolutionAdapter.send', () => {
   const secretApiKey = 'super-secret-evolution-key'
 
   it('posts to /message/sendText/{instance} with the apikey header and extracts data.key.id', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     fetchMock.mockResolvedValueOnce(jsonResponse({ key: { id: 'EVO-MSG-1' } }))
 
     const job = makeJob({
@@ -109,6 +111,8 @@ describe('evolutionAdapter.send', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://evo.example.com/message/sendText/minha-instancia')
     expect(init.headers).toMatchObject({ apikey: secretApiKey })
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000)
+    expect(init.signal).toBeInstanceOf(AbortSignal)
     const body = JSON.parse(init.body as string)
     expect(body).toEqual({ number: '5511999999999', text: 'ola mundo' })
   })
@@ -126,7 +130,7 @@ describe('evolutionAdapter.send', () => {
     expect(result).toEqual({ providerMessageId: 'EVO-MSG-2' })
   })
 
-  it('throws EvolutionApiError with httpStatus 500 on a 5xx response, classified as retryable', async () => {
+  it('throws EvolutionApiError with httpStatus 500 on a 5xx response, classified as uncertain', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'internal error' }, 500))
 
     const job = makeJob({
@@ -144,7 +148,7 @@ describe('evolutionAdapter.send', () => {
 
     expect(caught).toBeInstanceOf(EvolutionApiError)
     expect((caught as EvolutionApiError).httpStatus).toBe(500)
-    expect(classifyMetaError(caught as EvolutionApiError)).toMatchObject({ errorClass: 'retryable' })
+    expect(classifyMetaError(caught as EvolutionApiError)).toMatchObject({ errorClass: 'uncertain' })
     expect(String(caught)).not.toContain(secretApiKey)
   })
 

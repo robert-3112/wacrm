@@ -26,6 +26,7 @@ const configuredVersion = process.env.META_GRAPH_API_VERSION?.trim()
 const META_API_VERSION =
   configuredVersion && /^v\d+\.\d+$/.test(configuredVersion) ? configuredVersion : 'v24.0'
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+const SEND_TIMEOUT_MS = 15_000
 
 /**
  * Base da Graph API resolvida (versão configurável por `META_GRAPH_API_VERSION`).
@@ -95,6 +96,15 @@ function authHeaders(accessToken: string): HeadersInit {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }
 }
 
+async function readSendResult(response: Response): Promise<MetaSendResult> {
+  const data = await response.json()
+  const messageId = data?.messages?.[0]?.id
+  if (typeof messageId !== 'string' || messageId.length === 0) {
+    throw new Error('meta_api_missing_message_id')
+  }
+  return { messageId }
+}
+
 // ============================================================
 // Sending
 // ============================================================
@@ -124,10 +134,10 @@ export async function sendTextMessage(args: SendTextMessageArgs): Promise<MetaSe
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   })
   if (!response.ok) await throwMetaError(response, `Meta API error: ${response.status}`)
-  const data = await response.json()
-  return { messageId: data.messages[0].id }
+  return readSendResult(response)
 }
 
 export type MediaKind = 'image' | 'video' | 'document' | 'audio'
@@ -174,10 +184,10 @@ export async function sendMediaMessage(args: SendMediaMessageArgs): Promise<Meta
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   })
   if (!response.ok) await throwMetaError(response, `Meta API error: ${response.status}`)
-  const data = await response.json()
-  return { messageId: data.messages[0].id }
+  return readSendResult(response)
 }
 
 import { buildSendComponents, type MetaTemplateComponent, type SendTimeParams } from './template-send-builder'
@@ -253,10 +263,10 @@ export async function sendTemplateMessage(args: SendTemplateMessageArgs): Promis
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   })
   if (!response.ok) await throwMetaError(response, `Meta API error: ${response.status}`)
-  const data = await response.json()
-  return { messageId: data.messages[0].id }
+  return readSendResult(response)
 }
 
 // ============================================================

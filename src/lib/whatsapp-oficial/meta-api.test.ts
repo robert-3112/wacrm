@@ -19,6 +19,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 function jsonResponse(body: unknown, status = 200) {
@@ -31,6 +32,7 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe('sendTextMessage', () => {
   it('posts the expected payload and returns the Meta message id', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.TEXT1' }] }))
 
     const result = await sendTextMessage({
@@ -45,6 +47,8 @@ describe('sendTextMessage', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://graph.facebook.com/v24.0/PNID/messages')
     expect(init.headers).toMatchObject({ Authorization: 'Bearer tok' })
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000)
+    expect(init.signal).toBeInstanceOf(AbortSignal)
     const body = JSON.parse(init.body as string)
     expect(body).toMatchObject({
       messaging_product: 'whatsapp',
@@ -67,6 +71,13 @@ describe('sendTextMessage', () => {
       code: 100,
       httpStatus: 400,
     })
+  })
+
+  it('treats a 2xx response without a message id as an uncertain outcome', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [] }))
+    await expect(
+      sendTextMessage({ phoneNumberId: 'PNID', accessToken: 'tok', to: '551199', text: 'x' }),
+    ).rejects.toThrow('meta_api_missing_message_id')
   })
 })
 

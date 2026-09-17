@@ -130,7 +130,9 @@ vi.mock('@/lib/whatsapp-oficial/supabase-admin', () => ({
 
 import { GET as getHealth } from './health/route'
 import { GET as getConversations } from './conversations/route'
+import { GET as getConversation } from './conversations/[id]/route'
 import { GET as getMessages } from './conversations/[id]/messages/route'
+import { GET as getMessage } from './messages/[id]/route'
 import { POST as postMessage } from './messages/route'
 import { GET as getContacts } from './contacts/route'
 
@@ -301,8 +303,10 @@ describe('401 — todas as rotas, todos os casos, o mesmo corpo', () => {
   const rotas: Array<[string, (r: Request) => Promise<Response>]> = [
     ['health', (r) => getHealth(r)],
     ['conversations', (r) => getConversations(r)],
+    ['conversations/{id}', (r) => getConversation(r, { params: Promise.resolve({ id: uuid(10) }) })],
     ['contacts', (r) => getContacts(r)],
     ['messages (POST)', (r) => postMessage(r)],
+    ['messages/{id}', (r) => getMessage(r, { params: Promise.resolve({ id: uuid(100) }) })],
     [
       'conversations/{id}/messages',
       (r) => getMessages(r, { params: Promise.resolve({ id: uuid(10) }) }),
@@ -360,6 +364,15 @@ describe('403 — escopo ausente', () => {
     })
   })
 
+  it('conversations/{id} exige conversations:read', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['messages:read'])
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(403)
+    expect(await corpo(res)).toMatchObject({ required: 'conversations:read' })
+  })
+
   it('POST /messages exige messages:send', async () => {
     registraChave(CHAVE_A, 'key-a', 'sunt', ['messages:read', 'conversations:read'])
     const res = await postMessage(
@@ -384,6 +397,15 @@ describe('403 — escopo ausente', () => {
     expect(await corpo(res)).toMatchObject({ required: 'contacts:read' })
   })
 
+  it('messages/{id} exige messages:read', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['conversations:read'])
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(100) }),
+    })
+    expect(res.status).toBe(403)
+    expect(await corpo(res)).toMatchObject({ required: 'messages:read' })
+  })
+
   it('health nao exige escopo: chave sem escopo nenhum passa', async () => {
     registraChave(CHAVE_A, 'key-a', 'sunt', [])
     const res = await getHealth(req('/api/v1/health', CHAVE_A))
@@ -397,6 +419,90 @@ describe('403 — escopo ausente', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('ISOLAMENTO ENTRE TENANTS', () => {
+  it('messages/{id}: mensagem do vizinho e id inexistente tem o mesmo 404', async () => {
+    const doVizinho = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(101, '2') }),
+    })
+    const inexistente = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(999) }),
+    })
+    expect(doVizinho.status).toBe(404)
+    expect(inexistente.status).toBe(404)
+    expect(await corpo(doVizinho)).toEqual(await corpo(inexistente))
+  })
+
+  it('messages/{id}: so devolve mensagem do tenant e conversa correspondentes', async () => {
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(100) }),
+    })
+    expect(res.status).toBe(200)
+    expect((await corpo(res)).data).toMatchObject({
+      id: uuid(100),
+      conversation_id: uuid(10),
+      content: 'mensagem do tenant A',
+    })
+    expect(res.headers.get('cache-control')).toBe('private, no-store')
+    expect(eqPedidos).toContainEqual({ tabela: 'whatsapp_messages', coluna: 'tenant_id', valor: 'sunt' })
+    expect(eqPedidos).toContainEqual({ tabela: 'whatsapp_conversations', coluna: 'tenant_id', valor: 'sunt' })
+  })
+
+  it('messages/{id}: falha fechado se a mensagem aponta para conversa de outro tenant', async () => {
+    db.whatsapp_messages.push({
+      id: uuid(103),
+      created_at: '2026-07-13T00:00:00.000Z',
+      tenant_id: 'sunt',
+      conversation_id: uuid(11, '2'),
+      content: 'NAO EXPOR',
+    })
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(103) }),
+    })
+    expect(res.status).toBe(404)
+    expect(JSON.stringify(await corpo(res))).not.toContain('NAO EXPOR')
+  })
+
+  it('messages/{id}: id malformado devolve 400 sem consultar mensagens', async () => {
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: 'nao-e-uuid' }),
+    })
+    expect(res.status).toBe(400)
+    expect(eqPedidos).toEqual([])
+  })
+
+  it('conversations/{id}: conversa de outro tenant e id inexistente tem o mesmo 404', async () => {
+    const doVizinho = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(11, '2') }),
+    })
+    const inexistente = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(999) }),
+    })
+
+    expect(doVizinho.status).toBe(404)
+    expect(inexistente.status).toBe(404)
+    expect(await corpo(doVizinho)).toEqual(await corpo(inexistente))
+  })
+
+  it('conversations/{id}: devolve apenas a conversa solicitada do tenant', async () => {
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(200)
+    const body = await corpo(res)
+    expect(body.data).toMatchObject({ id: uuid(10), contact: { nome: 'Ana' } })
+    expect(JSON.stringify(body)).not.toContain('SEGREDO DO VIZINHO')
+    expect(eqPedidos).toContainEqual({ tabela: 'whatsapp_conversations', coluna: 'id', valor: uuid(10) })
+    expect(res.headers.get('cache-control')).toBe('private, no-store')
+  })
+
+  it('conversations/{id}: rejeita id malformado antes da consulta de dados', async () => {
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: 'nao-e-uuid' }),
+    })
+    expect(res.status).toBe(400)
+    expect(await corpo(res)).toMatchObject({ error: 'bad_request' })
+    expect(eqPedidos).toEqual([])
+  })
+
   it('conversations: a chave de A nao lista a conversa de B', async () => {
     const res = await getConversations(req('/api/v1/conversations', CHAVE_A))
     expect(res.status).toBe(200)
@@ -517,6 +623,28 @@ describe('ISOLAMENTO ENTRE TENANTS', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('conversations — o escopo gateia o que sai no corpo', () => {
+  it('conversations/{id}: omite preview e telefone sem os escopos correspondentes', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['conversations:read'])
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await corpo(res)).data as Record<string, unknown>
+    expect(body).not.toHaveProperty('last_message_preview')
+    expect(body.contact).toEqual({ id: uuid(1), nome: 'Ana' })
+    expect(JSON.stringify(body)).not.toContain('5511900000001')
+  })
+
+  it('conversations/{id}: libera preview e telefone com ambos os escopos', async () => {
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await corpo(res)).data as Record<string, unknown>
+    expect(body.last_message_preview).toBe('oi')
+    expect(body.contact).toEqual({ id: uuid(1), nome: 'Ana', whatsapp: '5511900000001' })
+  })
+
   /** Lê a única conversa do tenant A com a chave A configurada com `escopos`. */
   async function conversaCom(escopos: string[]) {
     registraChave(CHAVE_A, 'key-a', 'sunt', escopos)
@@ -606,6 +734,28 @@ describe('conversations — tenant do lead embedado', () => {
     })
   })
 
+  it('conversations/{id}: nao vaza lead apontado de outro tenant', async () => {
+    semeiaLeadCruzado()
+    const erros = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(13) }),
+    })
+    const body = await corpo(res)
+
+    expect(res.status).toBe(200)
+    expect(body.data).toMatchObject({ id: uuid(13), contact: null, lead_id: null })
+    expect(JSON.stringify(body)).not.toContain(uuid(1, '2'))
+    expect(JSON.stringify(body)).not.toContain('SEGREDO DO VIZINHO')
+    expect(JSON.stringify(body)).not.toContain('5511911111111')
+    expect(eqPedidos).toContainEqual({
+      tabela: 'whatsapp_conversations',
+      coluna: 'lead.tenant_id',
+      valor: 'sunt',
+    })
+    erros.mockRestore()
+  })
+
   it('conversa de A apontando para lead de B nao vaza nome nem telefone', async () => {
     semeiaLeadCruzado()
     const erros = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -616,14 +766,17 @@ describe('conversations — tenant do lead embedado', () => {
 
     expect(texto).not.toContain('SEGREDO DO VIZINHO')
     expect(texto).not.toContain('5511911111111')
+    expect(texto).not.toContain(uuid(1, '2'))
 
     const linhas = body.data as Array<Record<string, unknown>>
     const cruzada = linhas.find((l) => l.id === uuid(13))
     // A CONVERSA é do tenant A e continua listada — quem some é só o contato divergente.
     expect(cruzada).toBeDefined()
     expect(cruzada?.contact).toBeNull()
+    expect(cruzada?.lead_id).toBeNull()
     // E a conversa sadia do mesmo tenant não foi junto no laço.
     expect(linhas.find((l) => l.id === uuid(10))?.contact).toMatchObject({ nome: 'Ana' })
+    expect(linhas.find((l) => l.id === uuid(10))?.lead_id).toBe(uuid(1))
 
     // Divergência é problema de integridade: registra, mas sem PII no log.
     expect(erros).toHaveBeenCalled()
@@ -663,6 +816,7 @@ describe('conversations — tenant do lead embedado', () => {
     const semTenant = linhas.find((l) => l.id === uuid(14))
     expect(semTenant).toBeDefined()
     expect(semTenant?.contact).toBeNull()
+    expect(semTenant?.lead_id).toBeNull()
   })
 })
 

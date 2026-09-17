@@ -63,43 +63,99 @@ function makeAdmin(
   opts: {
     claimResult?: { ok: boolean; claimed?: OutboxJob[] }
     claimError?: unknown
-    messages?: Record<string, { status: string }>
+    messages?: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string }>
+    missingMessageIds?: Set<string>
+    recipients?: Record<string, Array<{ tenant_id: string; broadcast_id: string }>>
+    broadcasts?: Record<string, { status: string; tenant_id: string; canal_id: string }>
+    failSelectForTables?: Set<string>
     failUpdateForIds?: Set<string>
+    lostClaimForIds?: Set<string>
   } = {},
 ) {
   const calls: MockCall[] = []
-  const messages: Record<string, { status: string }> = { ...(opts.messages ?? {}) }
+  const rpcCalls: Array<Record<string, unknown>> = []
+  const messages: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string }> = { ...(opts.messages ?? {}) }
 
   const admin = {
-    rpc: async () => {
+    rpc: async (_name: string, args: Record<string, unknown>) => {
+      rpcCalls.push(args)
       if (opts.claimError) return { data: null, error: opts.claimError }
       return { data: opts.claimResult ?? { ok: true, claimed: [] }, error: null }
     },
     from: (table: string) => ({
-      update: (values: Record<string, unknown>) => ({
-        eq: async (column: string, id: string) => {
-          calls.push({ table, op: 'update', values, filters: { [column]: id } })
-          if (opts.failUpdateForIds?.has(id)) {
-            throw new Error(`simulated update failure for ${id}`)
-          }
-          if (table === 'whatsapp_messages') {
-            messages[id] = { ...(messages[id] ?? { status: 'pendente' }), ...values } as {
-              status: string
+      update: (values: Record<string, unknown>) => {
+        const filters: Record<string, unknown> = {}
+        const query = {
+          eq(column: string, id: string) {
+            filters[column] = id
+            return query
+          },
+          in(column: string, values: string[]) {
+            filters[column] = values
+            return query
+          },
+          then<TResult1 = { error: null; count: number }, TResult2 = never>(
+            onfulfilled?: ((value: { error: null; count: number }) => TResult1 | PromiseLike<TResult1>) | null,
+            onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+          ) {
+            calls.push({ table, op: 'update', values, filters: { ...filters } })
+            const id = filters.id as string
+            if (opts.failUpdateForIds?.has(id)) {
+              return Promise.reject(new Error(`simulated update failure for ${id}`)).then(onfulfilled, onrejected)
             }
-          }
-          return { error: null }
-        },
-      }),
+            const allowedStatuses = filters.status as string[] | undefined
+            const currentStatus = messages[id]?.status ?? 'pendente'
+            const currentTenant = messages[id]?.tenant_id ?? 't-1'
+            const currentConversation = messages[id]?.conversation_id ?? 'conv-1'
+            const count = opts.lostClaimForIds?.has(id) ||
+              (table === 'whatsapp_messages' && (
+                (allowedStatuses && !allowedStatuses.includes(currentStatus)) ||
+                (filters.tenant_id && filters.tenant_id !== currentTenant) ||
+                (filters.conversation_id && filters.conversation_id !== currentConversation)
+              ))
+              ? 0 : 1
+            if (count && table === 'whatsapp_messages') {
+              messages[id] = { ...(messages[id] ?? { status: 'pendente' }), ...values } as { status: string }
+            }
+            return Promise.resolve({ error: null, count }).then(onfulfilled, onrejected)
+          },
+        }
+        return query
+      },
       insert: (values: Record<string, unknown>) => {
         calls.push({ table, op: 'insert', values })
         return Promise.resolve({ error: null })
       },
       select: () => ({
         eq: (column: string, id: string) => ({
+          limit: async (count: number) => {
+            calls.push({ table, op: 'select', filters: { [column]: id } })
+            if (opts.failSelectForTables?.has(table)) {
+              return { data: null, error: { message: 'simulated read failure' } }
+            }
+            return {
+              data: table === 'whatsapp_broadcast_recipients'
+                ? (opts.recipients?.[id] ?? []).slice(0, count)
+                : [],
+              error: null,
+            }
+          },
           maybeSingle: async () => {
             calls.push({ table, op: 'select', filters: { [column]: id } })
+            if (opts.failSelectForTables?.has(table)) {
+              return { data: null, error: { message: 'simulated read failure' } }
+            }
             if (table === 'whatsapp_messages') {
-              return { data: messages[id] ?? null, error: null }
+              if (opts.missingMessageIds?.has(id)) return { data: null, error: null }
+              return { data: {
+                tenant_id: messages[id]?.tenant_id ?? 't-1',
+                conversation_id: messages[id]?.conversation_id ?? 'conv-1',
+                direction: messages[id]?.direction ?? 'outbound',
+                status: messages[id]?.status ?? 'pendente',
+              }, error: null }
+            }
+            if (table === 'whatsapp_broadcasts') {
+              return { data: opts.broadcasts?.[id] ?? null, error: null }
             }
             return { data: null, error: null }
           },
@@ -108,7 +164,7 @@ function makeAdmin(
     }),
   }
 
-  return { admin: admin as unknown as SupabaseClient, calls, messages }
+  return { admin: admin as unknown as SupabaseClient, calls, messages, rpcCalls }
 }
 
 function makeJob(overrides: Partial<OutboxJob> = {}): OutboxJob {
@@ -247,13 +303,19 @@ describe('processOutboxBatch — live success', () => {
 
     const outboxUpdate = outboxUpdates(calls)
     expect(outboxUpdate.some((c) => c.values?.status === 'enviado')).toBe(true)
+    expect(outboxUpdate.find((c) => c.values?.status === 'enviado')?.filters).toMatchObject({
+      id: 'ob-1', claimed_by: 'w1', status: 'processando',
+    })
 
     expect(messages['msg-1']).toMatchObject({ status: 'enviada', wamid: 'wamid.REAL123' })
+    expect(messageUpdates(calls)[0].filters).toMatchObject({
+      id: 'msg-1', tenant_id: 't-1', conversation_id: 'conv-1',
+    })
 
     // A ORDEM é contrato: a mensagem grava antes da fila. Um crash entre as
-    // duas escritas cai na barreira (b) no re-claim (mensagem terminal →
-    // outbox 'enviado', sem reenvio); na ordem inversa o crash deixa
-    // outbox='enviado' com a mensagem 'pendente', estado que nada cobre.
+    // duas escritas deixa a fila em processando para reconciliação; o wamid
+    // persistido permite fechar a fila sem novo envio. Na ordem inversa o
+    // crash deixaria outbox=enviado com a mensagem pendente.
     const idxMensagem = calls.findIndex(
       (c) => c.table === 'whatsapp_messages' && c.op === 'update',
     )
@@ -267,10 +329,82 @@ describe('processOutboxBatch — live success', () => {
     expect(audits[0].values).toMatchObject({ decisao: 'enviado' })
     expect(audits[0].values?.detalhe).toMatchObject({ provider_message_id: 'wamid.REAL123' })
   })
+
+  it('preserves an entregue receipt that arrives before the provider response is recorded', async () => {
+    const job = makeJob()
+    const { admin, calls, messages } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    vi.mocked(adapterMock.send).mockImplementation(async () => {
+      messages['msg-1'] = { status: 'entregue' }
+      return { providerMessageId: 'wamid.REAL123' }
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.sent).toBe(1)
+    expect(messages['msg-1'].status).toBe('entregue')
+    expect(messageUpdates(calls)[0].filters?.status).toEqual(['pendente', 'falhou'])
+    expect(outboxUpdates(calls).some((call) => call.values?.status === 'enviado')).toBe(true)
+  })
+
+  it('stamps send completion using the time after the provider responds', async () => {
+    const startedAt = new Date('2026-09-16T12:00:00Z')
+    const completedAt = new Date('2026-09-16T12:00:15Z')
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(startedAt)
+      const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [makeJob()] } })
+      vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+      vi.mocked(adapterMock.send).mockImplementation(async () => {
+        vi.setSystemTime(completedAt)
+        return { providerMessageId: 'wamid.LATER' }
+      })
+
+      const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+      expect(result.sent).toBe(1)
+      expect(outboxUpdates(calls).find((c) => c.values?.status === 'enviado')?.values?.updated_at)
+        .toBe(completedAt.toISOString())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('processOutboxBatch — linked message isolation', () => {
+  it.each([
+    ['outro tenant', { status: 'pendente', tenant_id: 't-2' }],
+    ['outra conversa', { status: 'pendente', conversation_id: 'conv-2' }],
+    ['mensagem inbound', { status: 'recebida', direction: 'inbound' }],
+  ])('blocks %s before provider contact', async (_label, linkedMessage) => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob()] },
+      messages: { 'msg-1': linkedMessage },
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.blocked).toBe(1)
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'mensagem_vinculo_invalido' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(messageUpdates(calls)).toHaveLength(0)
+    expect(adapterMock.send).not.toHaveBeenCalled()
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+  })
+
+  it('blocks a missing linked message before provider contact', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob()] },
+      missingMessageIds: new Set(['msg-1']),
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'mensagem_vinculo_invalido' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
 })
 
 describe('processOutboxBatch — live failure', () => {
-  it('retryable (http 500): outbox falhou with next_retry_at, message untouched, audit falha_retryable', async () => {
+  it('retryable (http 429): outbox falhou with next_retry_at, message untouched, audit falha_retryable', async () => {
     const job = makeJob({ attempts: 0, max_attempts: 5 })
     const { admin, calls, messages } = makeAdmin({
       claimResult: { ok: true, claimed: [job] },
@@ -280,7 +414,7 @@ describe('processOutboxBatch — live failure', () => {
     const now = new Date('2026-07-24T12:00:00Z')
     vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
     vi.mocked(adapterMock.send).mockRejectedValue(
-      Object.assign(new Error('server error'), { httpStatus: 500 }),
+      Object.assign(new Error('rate limited'), { httpStatus: 429 }),
     )
 
     const result = await processOutboxBatch({ admin, flags, workerId: 'w1', now })
@@ -379,7 +513,11 @@ describe('processOutboxBatch — janela de 24h da Meta usa isTemplateJob, não j
 
   it('broadcast COM template_name fora da janela não morre — chega em simulado no shadow', async () => {
     const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta_lancamento' } })
-    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      recipients: { 'ob-1': [{ tenant_id: 't-1', broadcast_id: 'campaign-1' }] },
+      broadcasts: { 'campaign-1': { tenant_id: 't-1', canal_id: 'canal-1', status: 'enviando' } },
+    })
     // Kill switch de broadcast LIGADO: a barreira (c) não é o que está sendo testado aqui.
     const flags = makeFlags({ mode: 'shadow', broadcastEnabled: true })
 
@@ -475,6 +613,156 @@ describe('processOutboxBatch — janela de 24h da Meta usa isTemplateJob, não j
 })
 
 describe('processOutboxBatch — temporary blocks (requeue, not dead-letter)', () => {
+  it('does not send a claimed broadcast when its campaign was paused', async () => {
+    const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta', broadcast_id: 'campaign-1' } })
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      recipients: { 'ob-1': [{ tenant_id: 't-1', broadcast_id: 'campaign-1' }] },
+      broadcasts: { 'campaign-1': { tenant_id: 't-1', canal_id: 'canal-1', status: 'pausado' } },
+    })
+    const flags = makeFlags({ mode: 'live', broadcastEnabled: true })
+    const now = new Date('2026-09-16T12:00:00Z')
+
+    const result = await processOutboxBatch({ admin, flags, workerId: 'w1', now })
+
+    expect(result.blocked).toBe(1)
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'campanha_pausada' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente' })
+    expect(new Date(String(outboxUpdates(calls)[0].values?.next_retry_at)).getTime())
+      .toBeGreaterThan(now.getTime())
+    expect(auditInserts(calls)[0].values).toMatchObject({ motivo: 'campanha_pausada' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+  })
+
+  it('does not turn a database failure after provider 2xx into a retryable provider failure', async () => {
+    const job = makeJob()
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      failUpdateForIds: new Set(['msg-1']),
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    vi.mocked(adapterMock.send).mockResolvedValue({ providerMessageId: 'wamid.ACCEPTED' })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0].decision).toBe('erro_inesperado')
+    expect(outboxUpdates(calls)).toHaveLength(0)
+    expect(auditInserts(calls)).toHaveLength(0)
+    expect(adapterMock.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('quarantines ambiguous timeout/5xx without retry and leaves linked message for reconciliation', async () => {
+    const job = makeJob({ attempts: 0, max_attempts: 5 })
+    const { admin, calls, messages } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      messages: { 'msg-1': { status: 'pendente' } },
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    vi.mocked(adapterMock.send).mockRejectedValue(
+      Object.assign(new Error('upstream timeout'), { httpStatus: 503 }),
+    )
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.retried).toBe(0)
+    expect(result.deadLettered).toBe(1)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({
+      status: 'morto', last_error_code: 'resultado_incerto',
+    })
+    expect(outboxUpdates(calls)[0].values).not.toHaveProperty('next_retry_at')
+    expect(messages['msg-1'].status).toBe('pendente')
+    expect(auditInserts(calls)[0].values).toMatchObject({
+      decisao: 'falha_permanente', motivo: 'resultado_incerto',
+    })
+  })
+
+  it('cancels an already claimed outbox job when its campaign was cancelled', async () => {
+    const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta' } })
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      recipients: { 'ob-1': [{ tenant_id: 't-1', broadcast_id: 'campaign-1' }] },
+      broadcasts: { 'campaign-1': { tenant_id: 't-1', canal_id: 'canal-1', status: 'cancelado' } },
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'campanha_cancelada' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'cancelado' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+  })
+
+  it.each(['aprovado', 'enviando'])('permits broadcast when campaign is %s', async (status) => {
+    const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta' } })
+    const { admin } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      recipients: { 'ob-1': [{ tenant_id: 't-1', broadcast_id: 'campaign-1' }] },
+      broadcasts: { 'campaign-1': { tenant_id: 't-1', canal_id: 'canal-1', status } },
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    vi.mocked(adapterMock.send).mockResolvedValue({ providerMessageId: 'wamid.REAL123' })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.sent).toBe(1)
+    expect(adapterMock.send).toHaveBeenCalledOnce()
+  })
+
+  it.each(['whatsapp_broadcast_recipients', 'whatsapp_broadcasts'])(
+    'never sends when reading %s fails',
+    async (table) => {
+      const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta' } })
+      const { admin, calls } = makeAdmin({
+        claimResult: { ok: true, claimed: [job] },
+        recipients: { 'ob-1': [{ tenant_id: 't-1', broadcast_id: 'campaign-1' }] },
+        broadcasts: { 'campaign-1': { tenant_id: 't-1', canal_id: 'canal-1', status: 'enviando' } },
+        failSelectForTables: new Set([table]),
+      })
+
+      const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+      expect(result.retried).toBe(1)
+      expect(result.outcomes[0]).toMatchObject({ decision: 'reenfileirado', reason: 'falha_pre_envio' })
+      expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente', claimed_by: null })
+      expect(auditInserts(calls)[0].values).toMatchObject({ decisao: 'reenfileirado', motivo: 'falha_pre_envio' })
+      expect(adapterMock.send).not.toHaveBeenCalled()
+      expect(loadChannelCredential).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps an unlinked campaign job for investigation without sending or spinning', async () => {
+    const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta' } })
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const now = new Date('2026-09-16T12:00:00Z')
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1', now })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'campanha_vinculo_invalido' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente' })
+    expect(new Date(String(outboxUpdates(calls)[0].values?.next_retry_at)).getTime())
+      .toBeGreaterThanOrEqual(now.getTime() + 3600_000)
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('rechecks campaign after loading credentials to catch a pause during processing', async () => {
+    const job = makeJob({ tipo: 'broadcast', payload: { template_name: 'oferta' } })
+    const campaign = { tenant_id: 't-1', canal_id: 'canal-1', status: 'enviando' }
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      recipients: { 'ob-1': [{ tenant_id: 't-1', broadcast_id: 'campaign-1' }] },
+      broadcasts: { 'campaign-1': campaign },
+    })
+    vi.mocked(loadChannelCredential).mockImplementation(async () => {
+      campaign.status = 'pausado'
+      return 'secret-token'
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'campanha_pausada' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
   it('broadcast with broadcastEnabled=false goes back to pendente, not morto', async () => {
     const job = makeJob({ tipo: 'broadcast' })
     const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
@@ -564,9 +852,9 @@ describe('processOutboxBatch — missing credential in live mode', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('does NOT dead-letter when reading the credential fails transiently', async () => {
+  it('requeues when reading the credential fails transiently before provider contact', async () => {
     // A database blip must not permanently kill a perfectly valid message:
-    // the row stays 'processando' and lease recovery retries it later.
+    // provider contact has not started, so a fenced update can safely retry it later.
     const job = makeJob()
     const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
     const flags = makeFlags({ mode: 'live' })
@@ -578,9 +866,11 @@ describe('processOutboxBatch — missing credential in live mode', () => {
 
     expect(result.blocked).toBe(0)
     expect(result.deadLettered).toBe(0)
-    expect(result.outcomes[0]).toMatchObject({ decision: 'erro_inesperado' })
-    // nothing was written to the queue: no 'morto', no dead_letter_at
-    expect(outboxUpdates(calls)).toHaveLength(0)
+    expect(result.retried).toBe(1)
+    expect(result.outcomes[0]).toMatchObject({ decision: 'reenfileirado', reason: 'falha_pre_envio' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente', claimed_by: null })
+    expect(outboxUpdates(calls)[0].values?.dead_letter_at).toBeUndefined()
+    expect(auditInserts(calls)[0].values).toMatchObject({ decisao: 'reenfileirado', motivo: 'falha_pre_envio' })
     expect(adapterMock.send).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -610,6 +900,24 @@ describe('processOutboxBatch — resilience', () => {
 })
 
 describe('processOutboxBatch — claim RPC edge cases', () => {
+  it('limits a live claim to one job and at least a 120s lease', async () => {
+    const { admin, rpcCalls } = makeAdmin()
+    await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1', limit: 50, leaseSeconds: 30 })
+    expect(rpcCalls[0]).toMatchObject({ p_limit: 1, p_lease_seconds: 120 })
+  })
+
+  it('does not count a closure if the claimed worker/status no longer matches', async () => {
+    const job = makeJob()
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      lostClaimForIds: new Set(['ob-1']),
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags(), workerId: 'w1' })
+    expect(result.simulated).toBe(0)
+    expect(result.outcomes[0].decision).toBe('erro_inesperado')
+    expect(outboxUpdates(calls)[0].filters).toMatchObject({ claimed_by: 'w1', status: 'processando' })
+    expect(auditInserts(calls)).toHaveLength(0)
+  })
   it('returns a zeroed result when the claim RPC reports ok=false', async () => {
     const { admin } = makeAdmin({ claimResult: { ok: false } })
     const flags = makeFlags()
