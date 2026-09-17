@@ -1,10 +1,10 @@
-import type { Metadata } from "next";
-import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
-import { OficialInboxHeader } from "@/components/whatsapp-oficial/oficial-inbox-header";
+import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
+import { createClient } from '@/lib/supabase/server';
+import { OficialInboxHeader } from '@/components/whatsapp-oficial/oficial-inbox-header';
 
 /**
- * Layout for the official-channel inbox (Fase 6 — "SUNT WhatsApp Hub").
+ * Layout for the SUNT WhatsHub pages.
  *
  * Deliberately does NOT reuse `(dashboard)/dashboard-shell.tsx` /
  * `useAuth()` / `AuthProvider`: those are built around the WACRM
@@ -35,13 +35,25 @@ export default async function DashboardOficialLayout({
   } = await supabase.auth.getUser();
 
   if (!user) {
-    redirect("/login");
+    redirect('/login');
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background">
+    <div className="bg-background flex h-dvh min-h-0 flex-col overflow-hidden">
+      <a
+        href="#conteudo-whathub"
+        className="focus:bg-background focus:text-foreground focus:ring-ring sr-only focus:not-sr-only focus:fixed focus:z-50 focus:m-3 focus:rounded-md focus:px-4 focus:py-2 focus:ring-2"
+      >
+        Ir para o conteúdo
+      </a>
       <OficialInboxHeader userEmail={user.email ?? null} />
-      <main className="flex-1 overflow-hidden">{children}</main>
+      <main
+        id="conteudo-whathub"
+        className="min-h-0 flex-1 overflow-hidden"
+        tabIndex={-1}
+      >
+        {children}
+      </main>
     </div>
   );
 }

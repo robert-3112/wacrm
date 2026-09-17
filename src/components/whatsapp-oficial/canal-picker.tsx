@@ -18,12 +18,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { WhatsAppCanal } from "@/types/whatsapp-oficial";
-
-export function statusCanalVariant(status: string): "default" | "secondary" | "destructive" {
-  if (status === "ativo") return "default";
-  if (status === "pausado") return "secondary";
-  return "destructive";
-}
+import { statusCanalVariant } from "@/lib/whatsapp-oficial/canal-status";
 
 export function CanalResumo({ canal }: { canal: WhatsAppCanal }) {
   return (
