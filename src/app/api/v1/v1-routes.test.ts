@@ -45,6 +45,7 @@ class FakeQuery implements PromiseLike<{ data: Linha[] | null; error: { message:
   private linhas: Linha[]
   private limite: number | null = null
   private readonly inner: boolean
+  private embeddedConversationTenant: string | null = null
 
   constructor(
     private readonly tabela: string,
@@ -56,6 +57,10 @@ class FakeQuery implements PromiseLike<{ data: Linha[] | null; error: { message:
 
   eq(coluna: string, valor: unknown) {
     eqPedidos.push({ tabela: this.tabela, coluna, valor })
+    if (coluna === 'whatsapp_conversations.tenant_id') {
+      this.embeddedConversationTenant = String(valor)
+      return this
+    }
     if (coluna.includes('.')) {
       // Filtro de RECURSO EMBEDADO (`lead.tenant_id`). O fake registra e NÃO aplica, de
       // propósito: se emulasse, o teste de vazamento entre tenants passaria por causa do fake e
@@ -105,7 +110,8 @@ class FakeQuery implements PromiseLike<{ data: Linha[] | null; error: { message:
     if (this.tabela === 'leads' && this.inner) {
       // `!inner` = descarta lead sem conversa.
       out = out.filter((l) =>
-        db.whatsapp_conversations.some((c) => c.lead_id === l.id),
+        db.whatsapp_conversations.some((c) =>
+          c.lead_id === l.id && c.tenant_id === this.embeddedConversationTenant),
       )
     }
     return this.limite === null ? out : out.slice(0, this.limite)
@@ -135,6 +141,7 @@ import { GET as getMessages } from './conversations/[id]/messages/route'
 import { GET as getMessage } from './messages/[id]/route'
 import { POST as postMessage } from './messages/route'
 import { GET as getContacts } from './contacts/route'
+import { GET as getContact } from './contacts/[id]/route'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chaves e semeadura
@@ -322,6 +329,7 @@ describe('401 — todas as rotas, todos os casos, o mesmo corpo', () => {
     ['conversations', (r) => getConversations(r)],
     ['conversations/{id}', (r) => getConversation(r, { params: Promise.resolve({ id: uuid(10) }) })],
     ['contacts', (r) => getContacts(r)],
+    ['contacts/{id}', (r) => getContact(r, { params: Promise.resolve({ id: uuid(1) }) })],
     ['messages (POST)', (r) => postMessage(r)],
     ['messages/{id}', (r) => getMessage(r, { params: Promise.resolve({ id: uuid(100) }) })],
     [
@@ -847,6 +855,31 @@ describe('contacts', () => {
     const linhas = (await corpo(res)).data as Array<Record<string, unknown>>
     // O lead "Sem Conversa" existe no tenant, mas não é contato do canal.
     expect(linhas.map((l) => l.nome)).not.toContain('Sem Conversa')
+  })
+
+  it('leitura pontual exige lead e conversa do mesmo tenant', async () => {
+    const own = await getContact(req('/api/v1/contacts/id', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(1) }),
+    })
+    expect(own.status).toBe(200)
+    expect((await corpo(own)).data).toMatchObject({ id: uuid(1), nome: 'Ana' })
+
+    const foreign = await getContact(req('/api/v1/contacts/id', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(1, '2') }),
+    })
+    expect(foreign.status).toBe(404)
+
+    db.leads.push({ id: uuid(5), created_at: '2026-07-13T00:00:00.000Z', tenant_id: 'sunt', nome: 'Só CRM' })
+    db.whatsapp_conversations.push({
+      id: uuid(16, '2'), created_at: '2026-07-13T00:00:00.000Z',
+      tenant_id: 'outra-imobiliaria', lead_id: uuid(5),
+    })
+    const unlinked = await getContact(req('/api/v1/contacts/id', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(5) }),
+    })
+    expect(unlinked.status).toBe(404)
+    const list = await getContacts(req('/api/v1/contacts', CHAVE_A))
+    expect(JSON.stringify(await corpo(list))).not.toContain('Só CRM')
   })
 })
 
