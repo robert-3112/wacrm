@@ -41,7 +41,7 @@ import { isUuid } from '../serialize'
 const MAX_CONTENT_LENGTH = 4096
 
 /** Motivos que significam "a porta está fechada agora", não "seu pedido está malformado". */
-const CONFLITO = new Set(['lead_optout_ou_inativo', 'canal_inativo', 'conversa_encerrada'])
+const CONFLITO = new Set(['lead_optout_ou_inativo', 'canal_inativo', 'conversa_encerrada', 'idempotency_conflict'])
 
 interface Corpo {
   conversationId?: unknown
@@ -63,10 +63,20 @@ export async function POST(request: Request): Promise<Response> {
       throw apiV1BadRequest(`'content' exceeds ${MAX_CONTENT_LENGTH} characters`)
     }
 
-    const { data, error } = await ctx.admin.rpc('whatsapp_oficial_enfileirar_mensagem_api', {
+    const rawIdempotencyKey = request.headers.get('Idempotency-Key')
+    const idempotencyKey = rawIdempotencyKey?.trim()
+    if (rawIdempotencyKey !== null && (!idempotencyKey || idempotencyKey.length > 255)) {
+      throw apiV1BadRequest("'Idempotency-Key' must have 1–255 characters")
+    }
+
+    const { data, error } = await ctx.admin.rpc(
+      idempotencyKey
+        ? 'whatsapp_oficial_enfileirar_mensagem_api_idempotente'
+        : 'whatsapp_oficial_enfileirar_mensagem_api', {
       p_conversation_id: conversationId,
       p_content: content,
       p_api_key_id: ctx.apiKeyId,
+      ...(idempotencyKey ? { p_idempotency_key: idempotencyKey } : {}),
     })
 
     if (error) {
@@ -83,6 +93,7 @@ export async function POST(request: Request): Promise<Response> {
     const resultado = (data ?? {}) as {
       ok?: boolean
       reason?: string
+      replayed?: boolean
       message?: Record<string, unknown>
     }
 
@@ -98,6 +109,7 @@ export async function POST(request: Request): Promise<Response> {
     return apiV1Ok(
       {
         enfileirado: true,
+        ...(idempotencyKey ? { replayed: resultado.replayed === true } : {}),
         message: {
           id: mensagem.id,
           conversation_id: mensagem.conversation_id,
@@ -108,7 +120,7 @@ export async function POST(request: Request): Promise<Response> {
           created_at: mensagem.created_at,
         },
       },
-      201,
+      resultado.replayed === true ? 200 : 201,
     )
   } catch (error) {
     return toApiV1Response(error)

@@ -162,6 +162,7 @@ function registraChave(
 }
 
 /** Substitui a RPC de autenticação pelo comportamento real dela (provado no PGlite). */
+const idempotentMessages = new Map<string, { conversationId: string; content: string; message: Record<string, unknown> }>()
 function autenticacaoPadrao() {
   rpc.mockImplementation(async (nome: string, args: Record<string, unknown>) => {
     if (nome === 'whatsapp_oficial_autenticar_api_key') {
@@ -177,7 +178,8 @@ function autenticacaoPadrao() {
         error: null,
       }
     }
-    if (nome === 'whatsapp_oficial_enfileirar_mensagem_api') {
+    if (nome === 'whatsapp_oficial_enfileirar_mensagem_api' ||
+        nome === 'whatsapp_oficial_enfileirar_mensagem_api_idempotente') {
       const dona = Object.values(chaves).find((k) => k.apiKeyId === args.p_api_key_id)
       const conversa = db.whatsapp_conversations.find((c) => c.id === args.p_conversation_id)
       // Espelha a checagem que a RPC faz: conversa de outro tenant é indistinguível de
@@ -188,18 +190,32 @@ function autenticacaoPadrao() {
       if (conversa.optout_em) {
         return { data: { ok: false, reason: 'lead_optout_ou_inativo' }, error: null }
       }
+      const idemKey = nome.endsWith('_idempotente')
+        ? `${dona.tenant}:${dona.apiKeyId}:${args.p_idempotency_key}` : null
+      const previous = idemKey ? idempotentMessages.get(idemKey) : null
+      if (previous) {
+        if (previous.conversationId !== conversa.id || previous.content !== args.p_content) {
+          return { data: { ok: false, reason: 'idempotency_conflict' }, error: null }
+        }
+        return { data: { ok: true, message: previous.message, replayed: true }, error: null }
+      }
+      const message = {
+        id: 'msg-nova',
+        conversation_id: conversa.id,
+        direction: 'outbound',
+        message_type: 'text',
+        content: args.p_content,
+        status: 'pendente',
+        created_at: '2026-07-26T12:00:00.000Z',
+      }
+      if (idemKey) idempotentMessages.set(idemKey, {
+        conversationId: conversa.id, content: String(args.p_content), message,
+      })
       return {
         data: {
           ok: true,
-          message: {
-            id: 'msg-nova',
-            conversation_id: conversa.id,
-            direction: 'outbound',
-            message_type: 'text',
-            content: args.p_content,
-            status: 'pendente',
-            created_at: '2026-07-26T12:00:00.000Z',
-          },
+          message,
+          ...(idemKey ? { replayed: false } : {}),
         },
         error: null,
       }
@@ -286,6 +302,7 @@ function semeia() {
 
 beforeEach(() => {
   rpc.mockReset()
+  idempotentMessages.clear()
   __resetRateLimitForTests()
   eqPedidos.length = 0
   for (const k of Object.keys(chaves)) delete chaves[k]
@@ -954,11 +971,42 @@ describe('paginacao por cursor', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('POST /api/v1/messages', () => {
-  function envia(body: unknown, chave = CHAVE_A) {
+  function envia(body: unknown, chave = CHAVE_A, idempotencyKey?: string) {
     return postMessage(
-      req('/api/v1/messages', chave, { method: 'POST', body: JSON.stringify(body) }),
+      req('/api/v1/messages', chave, {
+        method: 'POST', body: JSON.stringify(body),
+        headers: idempotencyKey === undefined ? undefined : { 'Idempotency-Key': idempotencyKey },
+      }),
     )
   }
+
+  it('deduplicates an inbound event key and distinguishes a replay from a new enqueue', async () => {
+    const body = { conversationId: uuid(10), content: 'Resposta Sophia' }
+    const first = await envia(body, CHAVE_A, uuid(100))
+    const replay = await envia(body, CHAVE_A, uuid(100))
+
+    expect(first.status).toBe(201)
+    expect((await corpo(first)).data).toMatchObject({ enfileirado: true, replayed: false })
+    expect(replay.status).toBe(200)
+    expect((await corpo(replay)).data).toMatchObject({ enfileirado: true, replayed: true })
+    expect(rpc).toHaveBeenCalledWith('whatsapp_oficial_enfileirar_mensagem_api_idempotente', {
+      p_conversation_id: uuid(10), p_content: 'Resposta Sophia', p_api_key_id: 'key-a',
+      p_idempotency_key: uuid(100),
+    })
+  })
+
+  it('returns 409 if one idempotency key is reused with different content', async () => {
+    await envia({ conversationId: uuid(10), content: 'primeira' }, CHAVE_A, uuid(100))
+    const res = await envia({ conversationId: uuid(10), content: 'outra' }, CHAVE_A, uuid(100))
+    expect(res.status).toBe(409)
+    expect((await corpo(res)).error).toBe('idempotency_conflict')
+  })
+
+  it.each(['', 'x'.repeat(256)])('rejects an invalid idempotency key before enqueue', async (key) => {
+    const res = await envia({ conversationId: uuid(10), content: 'oi' }, CHAVE_A, key)
+    expect(res.status).toBe(400)
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_oficial_enfileirar_mensagem_api_idempotente', expect.anything())
+  })
 
   it('responde enfileirado:true e NUNCA a palavra "enviado"', async () => {
     const res = await envia({ conversationId: uuid(10), content: 'Bom dia!' })
