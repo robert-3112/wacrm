@@ -45,6 +45,13 @@ describe('POST /api/v1/sophia/replies', () => {
     expect(rpc).not.toHaveBeenCalled()
   })
 
+  it('rejects an oversized body before the database write', async () => {
+    const response = await POST(request({ claimId: CLAIM_ID, claimToken: TOKEN,
+      content: 'x'.repeat(32 * 1024) }))
+    expect(response.status).toBe(400)
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
   it('does not claim a send when a human paused Sophia during generation', async () => {
     rpc.mockResolvedValue({ data: { ok: false, reason: 'sophia_pausada' }, error: null })
     const response = await POST(request({ claimId: CLAIM_ID, claimToken: TOKEN, content: 'Olá' }))

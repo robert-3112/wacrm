@@ -487,6 +487,15 @@ describe('POST /api/v1/sophia/claims', () => {
     const hidden = await postSophiaClaim(claimRequest(uuid(101, '2')))
     expect(hidden.status).toBe(404)
   })
+
+  it('recusa um corpo acima de 512 bytes sem chamar a RPC de claim', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['sophia:process'])
+    const res = await postSophiaClaim(req('/api/v1/sophia/claims', CHAVE_A, {
+      method: 'POST', body: JSON.stringify({ message_id: uuid(100), padding: 'x'.repeat(600) }),
+    }))
+    expect(res.status).toBe(400)
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_sophia_claim_inbound', expect.anything())
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import {
   toApiV1Response,
 } from '@/lib/whatsapp-oficial/api-key-auth'
 import { isUuid } from '../../serialize'
+import { readBoundedJson } from '@/lib/whatsapp-oficial/bounded-json'
 
 interface ClaimResult {
   ok?: boolean
@@ -19,14 +20,7 @@ interface ClaimResult {
 export async function POST(request: Request): Promise<Response> {
   try {
     const ctx = await requireApiKeyWithScope(request, 'sophia:process')
-    const raw = await request.text()
-    if (raw.length > 512) throw apiV1BadRequest('Request body is too large')
-    let body: unknown
-    try {
-      body = JSON.parse(raw)
-    } catch {
-      throw apiV1BadRequest('Invalid JSON body')
-    }
+    const body = await readBoundedJson(request, 512)
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       throw apiV1BadRequest('message_id is required')
     }

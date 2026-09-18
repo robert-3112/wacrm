@@ -6,6 +6,7 @@ import {
   toApiV1Response,
 } from '@/lib/whatsapp-oficial/api-key-auth'
 import { isUuid } from '../../serialize'
+import { readBoundedJson } from '@/lib/whatsapp-oficial/bounded-json'
 
 const TOKEN_RE = /^sc_[0-9a-f]{64}$/
 
@@ -13,7 +14,7 @@ const TOKEN_RE = /^sc_[0-9a-f]{64}$/
 export async function POST(request: Request): Promise<Response> {
   try {
     const ctx = await requireApiKeyWithScope(request, 'sophia:process')
-    const body = (await request.json().catch(() => null)) as {
+    const body = (await readBoundedJson(request, 32 * 1024)) as {
       claimId?: unknown
       claimToken?: unknown
       content?: unknown

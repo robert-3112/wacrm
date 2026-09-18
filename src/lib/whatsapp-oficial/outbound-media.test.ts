@@ -9,7 +9,7 @@ function mp4Box(type: string, payload: Uint8Array): Uint8Array {
   return bytes
 }
 
-function validMp4(): Uint8Array {
+function validMp4(): Uint8Array<ArrayBuffer> {
   return new Uint8Array([
     ...mp4Box('ftyp', new TextEncoder().encode('isom\u0000\u0000\u0000\u0000isom')),
     ...mp4Box('moov', new Uint8Array([0, 1, 2, 3])),
