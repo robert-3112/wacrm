@@ -100,6 +100,27 @@ describe('POST /api/whatsapp-oficial/messages/send', () => {
     expect(mocks.requireConversationAccess).not.toHaveBeenCalled()
   })
 
+  it('rejects a media request instead of silently queueing its caption as text', async () => {
+    const res = await POST(jsonRequest({
+      conversationId: 'conv-1',
+      content: 'Veja a planta',
+      messageType: 'image',
+      mediaUrl: 'https://example.com/planta.jpg',
+    }))
+    expect(res.status).toBe(400)
+    expect(mocks.requireConversationAccess).not.toHaveBeenCalled()
+  })
+
+  it('rejects unrecognized send fields so a future media client cannot get a false success', async () => {
+    const res = await POST(jsonRequest({
+      conversationId: 'conv-1',
+      content: 'Veja a planta',
+      media_url: 'https://example.com/planta.jpg',
+    }))
+    expect(res.status).toBe(400)
+    expect(mocks.requireConversationAccess).not.toHaveBeenCalled()
+  })
+
   it('uses the atomic enqueue RPC for an authorized caller', async () => {
     const admin = makeAdmin()
     mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
