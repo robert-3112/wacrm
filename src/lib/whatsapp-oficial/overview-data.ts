@@ -7,7 +7,8 @@ export interface OverviewCounts {
 }
 
 export async function loadOverviewCounts(
-  supabase: SupabaseClient
+  supabase: SupabaseClient,
+  tenantId: string
 ): Promise<OverviewCounts> {
   // The caller supplies the authenticated client so RLS scopes every count to
   // conversations this operator may actually see. `head` avoids transferring
@@ -16,14 +17,17 @@ export async function loadOverviewCounts(
     supabase
       .from('whatsapp_conversations')
       .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenantId)
       .eq('status', 'aberta'),
     supabase
       .from('whatsapp_conversations')
       .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenantId)
       .eq('status', 'pendente'),
     supabase
       .from('whatsapp_conversations')
       .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenantId)
       .gt('nao_lidas_corretor', 0),
   ]);
 
