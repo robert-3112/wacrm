@@ -141,6 +141,32 @@ describe('metaCloudAdapter media job guards', () => {
       .rejects.toThrow('ambiguous media reference')
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('sends an MP3 media ID without an unsupported caption', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.audio-1' }] }))
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'audio', media_id: '1234567890' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.audio-1' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'audio', audio: { id: '1234567890' },
+    })
+  })
+
+  it('sends an MP4 media ID with a caption', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.video-1' }] }))
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'video', media_id: '1234567890', caption: 'Tour' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.video-1' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'video', video: { id: '1234567890', caption: 'Tour' },
+    })
+  })
 })
 
 describe('evolutionAdapter.isConfigured', () => {
