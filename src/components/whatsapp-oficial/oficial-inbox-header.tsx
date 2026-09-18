@@ -10,6 +10,7 @@ import {
   Megaphone,
   MessageSquareText,
   Smartphone,
+  Users,
   UsersRound,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -34,6 +35,11 @@ const NAV = [
     href: '/whatsapp-oficial/contatos',
     label: 'Contatos',
     icon: UsersRound,
+  },
+  {
+    href: '/whatsapp-oficial/equipe',
+    label: 'Equipe',
+    icon: Users,
   },
   {
     href: '/whatsapp-oficial/campanhas',
@@ -152,7 +158,7 @@ export function OficialInboxHeader({
 
       <nav
         aria-label="Seções do WhatsHub"
-        className="border-sidebar-border grid h-[88px] grid-cols-3 grid-rows-2 border-t sm:h-14 sm:grid-cols-6 sm:grid-rows-1 xl:hidden"
+        className="border-sidebar-border grid h-[88px] grid-cols-4 grid-rows-2 border-t sm:h-14 sm:grid-cols-7 sm:grid-rows-1 xl:hidden"
       >
         {NAV.map((item) => {
           const ativa = isRotaAtiva(pathname, item.href);
