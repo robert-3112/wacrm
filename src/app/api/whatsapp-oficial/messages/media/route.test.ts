@@ -22,6 +22,7 @@ vi.mock('@/lib/whatsapp-oficial/channel-credentials', async () => ({
 }))
 
 import { UnauthorizedError } from '@/lib/whatsapp-oficial/api-auth'
+import { MetaApiError } from '@/lib/whatsapp-oficial/meta-api'
 import { GET, POST } from './route'
 
 const REQUEST_ID = 'b5a9a4df-98d4-4290-9fc4-16fd1c6e03a1'
@@ -72,10 +73,13 @@ function authorize(admin: ReturnType<typeof makeAdmin>) {
   })
 }
 
-function request(file = new File([new Uint8Array([0xff, 0xd8, 0xff, 0x00])], 'foto.jpg', { type: 'image/jpeg' })) {
+function request(
+  file = new File([new Uint8Array([0xff, 0xd8, 0xff, 0x00])], 'foto.jpg', { type: 'image/jpeg' }),
+  caption = 'Fachada',
+) {
   const form = new FormData()
   form.set('file', file)
-  form.set('caption', 'Fachada')
+  form.set('caption', caption)
   return new Request('http://localhost/api/whatsapp-oficial/messages/media', {
     method: 'POST', body: form,
     headers: { 'x-conversation-id': '11111111-1111-4111-8111-111111111111', 'x-client-request-id': REQUEST_ID },
@@ -151,6 +155,65 @@ describe('POST /api/whatsapp-oficial/messages/media', () => {
       p_media_kind: 'image', p_media_mime_type: 'image/jpeg', p_media_filename: 'foto.jpg',
       p_caption: 'Fachada', p_client_request_id: REQUEST_ID, p_media_sha256: FILE_SHA256,
     })
+  })
+
+  it('queues a captionless MP3 as audio', async () => {
+    const admin = makeAdmin(); authorize(admin)
+    const audio = new File([new Uint8Array([0xff, 0xfb, 0x90, 0x64])],
+      'corretor.mp3', { type: 'audio/mpeg' })
+    const res = await POST(request(audio, ''))
+    expect(res.status).toBe(201)
+    expect(admin.rpc).toHaveBeenCalledWith('whatsapp_oficial_enfileirar_midia',
+      expect.objectContaining({ p_media_kind: 'audio', p_media_mime_type: 'audio/mpeg', p_caption: '' }))
+  })
+
+  it('rejects MP3 captions before uploading', async () => {
+    const admin = makeAdmin(); authorize(admin)
+    const audio = new File([new Uint8Array([0xff, 0xfb, 0x90, 0x64])],
+      'corretor.mp3', { type: 'audio/mpeg' })
+    const res = await POST(request(audio, 'Uma legenda'))
+    expect(res.status).toBe(400)
+    expect(mocks.uploadMedia).not.toHaveBeenCalled()
+  })
+
+  it('queues an MP4 with a caption as video', async () => {
+    const admin = makeAdmin(); authorize(admin)
+    const box = (type: string, payload: number[]) => {
+      const bytes = new Uint8Array(payload.length + 8)
+      new DataView(bytes.buffer).setUint32(0, bytes.length)
+      bytes.set(new TextEncoder().encode(type), 4)
+      bytes.set(payload, 8)
+      return bytes
+    }
+    const video = new File([new Uint8Array([
+      ...box('ftyp', [...new TextEncoder().encode('isom'), 0, 0, 0, 0]),
+      ...box('moov', [0, 1]), ...box('mdat', [1, 2]),
+    ])], 'tour.mp4', { type: 'video/mp4' })
+    const res = await POST(request(video, 'Tour do apartamento'))
+    expect(res.status).toBe(201)
+    expect(admin.rpc).toHaveBeenCalledWith('whatsapp_oficial_enfileirar_midia',
+      expect.objectContaining({ p_media_kind: 'video', p_media_mime_type: 'video/mp4',
+        p_caption: 'Tour do apartamento' }))
+  })
+
+  it('explains a Meta rejection of an MP4 before enqueueing', async () => {
+    const admin = makeAdmin(); authorize(admin)
+    const box = (type: string, payload: number[]) => {
+      const bytes = new Uint8Array(payload.length + 8)
+      new DataView(bytes.buffer).setUint32(0, bytes.length)
+      bytes.set(new TextEncoder().encode(type), 4)
+      bytes.set(payload, 8)
+      return bytes
+    }
+    const video = new File([new Uint8Array([
+      ...box('ftyp', [...new TextEncoder().encode('isom'), 0, 0, 0, 0]),
+      ...box('moov', [0, 1]), ...box('mdat', [1, 2]),
+    ])], 'tour.mp4', { type: 'video/mp4' })
+    mocks.uploadMedia.mockRejectedValue(new MetaApiError('Unsupported codec', { httpStatus: 400, code: 100 }))
+    const res = await POST(request(video, 'Tour'))
+    expect(res.status).toBe(422)
+    expect((await res.json()).error).toContain('H.264/AAC')
+    expect(admin.rpc).not.toHaveBeenCalled()
   })
 
   it('never uploads a second time when the request body exceeds the size cap', async () => {

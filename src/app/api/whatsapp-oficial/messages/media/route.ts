@@ -3,7 +3,7 @@ import { BadRequestError, isPostgrestPermissionError, requireConversationAccess,
 import { isAllowlisted } from '@/lib/whatsapp-oficial/allowlist'
 import { loadChannelCredential } from '@/lib/whatsapp-oficial/channel-credentials'
 import { isSendEnabledFor, readWhatsappFlags } from '@/lib/whatsapp-oficial/env-flags'
-import { uploadMedia } from '@/lib/whatsapp-oficial/meta-api'
+import { MetaApiError, uploadMedia } from '@/lib/whatsapp-oficial/meta-api'
 import { isInsideFreeFormWindow } from '@/lib/whatsapp-oficial/meta-window'
 import { MediaValidationError, validateOutboundMedia } from '@/lib/whatsapp-oficial/outbound-media'
 import { WHATSAPP_OFICIAL_RATE_LIMITS, checkRateLimit, rateLimitResponse } from '@/lib/whatsapp-oficial/rate-limit'
@@ -149,9 +149,17 @@ export async function POST(request: Request): Promise<Response> {
         phoneNumberId: channel.phone_number_id, accessToken, file, filename: media.filename,
       })
       mediaId = uploaded.mediaId
-    } catch {
+    } catch (error) {
       // Uploading a file never sends a message, so the client may safely retry
       // with the same request id. Do not expose the Meta response or token.
+      if (error instanceof MetaApiError && error.httpStatus === 400) {
+        const detail = media.kind === 'video'
+          ? ' Para vídeo, confira MP4 com H.264/AAC.'
+          : media.kind === 'audio'
+            ? ' Para áudio, confira o formato MP3.'
+            : ''
+        return NextResponse.json({ error: `A Meta recusou o arquivo.${detail}` }, { status: 422 })
+      }
       return NextResponse.json({ error: 'Falha ao carregar mídia na Meta; tente novamente' }, { status: 502 })
     }
     const { data, error } = await admin.rpc('whatsapp_oficial_enfileirar_midia', {

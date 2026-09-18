@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Text and guarded JPG/PNG/PDF composer for the official inbox. Both paths
+ * Text and guarded JPG/PNG/PDF/MP3/MP4 composer for the official inbox. Both paths
  * enqueue an outbox job; a successful response means queued, not delivered.
  */
 
@@ -17,7 +17,7 @@ import type { WhatsAppMessage } from "@/types/whatsapp-oficial";
 const MAX_LENGTH = 4096;
 const MAX_CAPTION_LENGTH = 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const MAX_PDF_BYTES = 16 * 1024 * 1024;
+const MAX_OTHER_MEDIA_BYTES = 16 * 1024 * 1024;
 const MAX_TEXTAREA_HEIGHT_PX = 120;
 
 interface MessageComposerProps {
@@ -81,6 +81,10 @@ export function MessageComposer({
       toast.error("Envio de mídia indisponível neste momento.");
       return;
     }
+    if (file?.type === "audio/mpeg" && trimmed) {
+      toast.error("Áudio não aceita legenda; envie o texto separadamente.");
+      return;
+    }
 
     setSending(true);
     let result;
@@ -115,11 +119,13 @@ export function MessageComposer({
 
   const handleFileSelected = useCallback((selected: File | undefined) => {
     if (!selected) return;
-    const max = selected.type === "application/pdf" ? MAX_PDF_BYTES : MAX_IMAGE_BYTES;
-    if (!["image/jpeg", "image/png", "application/pdf"].includes(selected.type)) {
-      toast.error("Anexe somente JPG, PNG ou PDF.");
+    const max = selected.type.startsWith("image/") ? MAX_IMAGE_BYTES : MAX_OTHER_MEDIA_BYTES;
+    if (!["image/jpeg", "image/png", "application/pdf", "audio/mpeg", "video/mp4"].includes(selected.type)) {
+      toast.error("Anexe somente JPG, PNG, PDF, MP3 ou MP4.");
     } else if (selected.size === 0 || selected.size > max) {
       toast.error(`Arquivo vazio ou acima do limite de ${max / 1024 / 1024} MB.`);
+    } else if (selected.type === "audio/mpeg" && text.trim()) {
+      toast.error("Envie o texto separadamente antes de anexar um áudio.");
     } else if (text.length > MAX_CAPTION_LENGTH) {
       toast.error("Reduza o texto para até 1024 caracteres antes de anexar.");
     } else {
@@ -128,7 +134,7 @@ export function MessageComposer({
       return;
     }
     if (fileInputRef.current) fileInputRef.current.value = "";
-  }, [text.length]);
+  }, [text]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -165,13 +171,13 @@ export function MessageComposer({
           <>
             <input
               ref={fileInputRef} type="file" className="sr-only"
-              accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
-              aria-label="Selecionar imagem ou PDF"
+              accept=".jpg,.jpeg,.png,.pdf,.mp3,.mp4,image/jpeg,image/png,application/pdf,audio/mpeg,video/mp4"
+              aria-label="Selecionar imagem, PDF, áudio MP3 ou vídeo MP4"
               onChange={(event) => handleFileSelected(event.target.files?.[0])}
             />
             <Button
               size="icon" variant="outline" disabled={disabled || sending}
-              aria-label="Anexar JPG, PNG ou PDF"
+              aria-label="Anexar JPG, PNG, PDF, MP3 ou MP4"
               onClick={() => fileInputRef.current?.click()}
               className="h-9 w-9 shrink-0 rounded-xl"
             ><Paperclip className="h-4 w-4" /></Button>
@@ -186,10 +192,10 @@ export function MessageComposer({
             adjustHeight();
           }}
           onKeyDown={handleKeyDown}
-          disabled={disabled || sending}
+          disabled={disabled || sending || file?.type === "audio/mpeg"}
           maxLength={file ? MAX_CAPTION_LENGTH : MAX_LENGTH}
           rows={1}
-          placeholder={disabled ? "Envio desabilitado" : file ? "Legenda (opcional)" : "Escreva uma mensagem..."}
+          placeholder={disabled ? "Envio desabilitado" : file?.type === "audio/mpeg" ? "Áudio sem legenda" : file ? "Legenda (opcional)" : "Escreva uma mensagem..."}
           className={cn(
             "flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
             (disabled || sending) && "cursor-not-allowed opacity-60",
@@ -213,7 +219,7 @@ export function MessageComposer({
       )}
       {mediaAvailable && envioReal && (
         <p className="mt-1 pl-1 text-[10px] text-muted-foreground">
-          JPG/PNG até 5 MB ou PDF até 16 MB. Disponível na janela de 24 horas.
+          JPG/PNG até 5 MB; PDF/MP3/MP4 até 16 MB. Áudio sem legenda. Janela de 24 horas.
         </p>
       )}
     </div>
