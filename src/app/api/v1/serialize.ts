@@ -49,7 +49,7 @@ export const API_LEAD_FIELDS = 'id, nome, name, whatsapp, phone, created_at'
  * `serializeConversation`. Ver `EMBED_TENANT_FILTER`.
  */
 export const API_CONVERSATION_SELECT = `
-  id, tenant_id, canal_id, lead_id, status, optout_em, wa_contact_name,
+  id, tenant_id, canal_id, lead_id, status, optout_em, sophia_ativa, wa_contact_name,
   ultima_mensagem_em, ultima_mensagem_preview, created_at,
   lead:leads ( tenant_id, ${API_LEAD_FIELDS} )
 `.trim()
@@ -106,6 +106,7 @@ export interface RawConversationRow {
   lead_id?: string
   status?: string
   optout_em?: string | null
+  sophia_ativa?: boolean
   wa_contact_name?: string | null
   ultima_mensagem_em?: string | null
   ultima_mensagem_preview?: string | null
@@ -176,6 +177,7 @@ export function serializeConversation(
     canal_id: raw.canal_id ?? null,
     // Quem consome a API precisa saber que a pessoa pediu para sair antes de tentar enviar.
     opted_out_at: raw.optout_em ?? null,
+    sophia_active: raw.sophia_ativa === true,
     wa_contact_name: raw.wa_contact_name ?? null,
     // Metadado legítimo de conversa (QUANDO houve mensagem, não O QUE dizia): fica sempre, e é
     // ele que permite ao integrador com `conversations:read` saber que precisa buscar em
