@@ -26,6 +26,7 @@ const configuredVersion = process.env.META_GRAPH_API_VERSION?.trim()
 const META_API_VERSION =
   configuredVersion && /^v\d+\.\d+$/.test(configuredVersion) ? configuredVersion : 'v24.0'
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+const SEND_TIMEOUT_MS = 15_000
 
 /**
  * Base da Graph API resolvida (versão configurável por `META_GRAPH_API_VERSION`).
@@ -95,6 +96,15 @@ function authHeaders(accessToken: string): HeadersInit {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` }
 }
 
+async function readSendResult(response: Response): Promise<MetaSendResult> {
+  const data = await response.json()
+  const messageId = data?.messages?.[0]?.id
+  if (typeof messageId !== 'string' || messageId.length === 0) {
+    throw new Error('meta_api_missing_message_id')
+  }
+  return { messageId }
+}
+
 // ============================================================
 // Sending
 // ============================================================
@@ -124,10 +134,10 @@ export async function sendTextMessage(args: SendTextMessageArgs): Promise<MetaSe
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   })
   if (!response.ok) await throwMetaError(response, `Meta API error: ${response.status}`)
-  const data = await response.json()
-  return { messageId: data.messages[0].id }
+  return readSendResult(response)
 }
 
 export type MediaKind = 'image' | 'video' | 'document' | 'audio'
@@ -137,8 +147,10 @@ export interface SendMediaMessageArgs {
   accessToken: string
   to: string
   kind: MediaKind
-  /** Public URL Meta fetches at send time. */
-  link: string
+  /** Public URL Meta fetches at send time. Use exactly one of link/mediaId. */
+  link?: string
+  /** ID returned by POST /{phone_number_id}/media; avoids a public media URL. */
+  mediaId?: string
   /** Caption — Meta caps at 1024 chars. image/video/document accept it; audio does NOT. */
   caption?: string
   /** Document-only file name. Ignored for image/video/audio. */
@@ -147,17 +159,18 @@ export interface SendMediaMessageArgs {
 }
 
 /**
- * Send an image, video, document, or audio (voice note) via a public URL.
+ * Send an image, video, document, or audio via a public URL or uploaded media ID.
  *
  * Audio is special-cased per Meta's spec: `caption` and `filename` are
  * BOTH rejected on audio (400) — only `{ link }` is sent. WhatsApp
  * auto-renders an OGG/Opus file as a playable voice note.
  */
 export async function sendMediaMessage(args: SendMediaMessageArgs): Promise<MetaSendResult> {
-  const { phoneNumberId, accessToken, to, kind, link, caption, filename, contextMessageId } = args
-  if (!link) throw new Error('sendMediaMessage requires a link.')
+  const { phoneNumberId, accessToken, to, kind, link, mediaId, caption, filename, contextMessageId } = args
+  if (!link && !mediaId) throw new Error('sendMediaMessage requires a link or mediaId.')
+  if (link && mediaId) throw new Error('sendMediaMessage requires exactly one of link or mediaId.')
 
-  const media: Record<string, unknown> = { link }
+  const media: Record<string, unknown> = mediaId ? { id: mediaId } : { link }
   if (caption && kind !== 'audio') media.caption = caption
   if (kind === 'document' && filename) media.filename = filename
 
@@ -174,10 +187,35 @@ export async function sendMediaMessage(args: SendMediaMessageArgs): Promise<Meta
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   })
   if (!response.ok) await throwMetaError(response, `Meta API error: ${response.status}`)
+  return readSendResult(response)
+}
+
+/** Uploads a validated file to Meta without sending it to any contact. */
+export async function uploadMedia(args: {
+  phoneNumberId: string
+  accessToken: string
+  file: File
+  filename?: string
+}): Promise<{ mediaId: string }> {
+  const form = new FormData()
+  form.set('messaging_product', 'whatsapp')
+  form.set('file', args.file, args.filename ?? args.file.name)
+  const response = await fetch(`${META_API_BASE}/${args.phoneNumberId}/media`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${args.accessToken}` },
+    body: form,
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (!response.ok) await throwMetaError(response, `Meta media upload error: ${response.status}`)
   const data = await response.json()
-  return { messageId: data.messages[0].id }
+  const mediaId = data?.id
+  if (typeof mediaId !== 'string' || !/^\d+$/.test(mediaId)) {
+    throw new Error('meta_api_missing_media_id')
+  }
+  return { mediaId }
 }
 
 import { buildSendComponents, type MetaTemplateComponent, type SendTimeParams } from './template-send-builder'
@@ -253,10 +291,10 @@ export async function sendTemplateMessage(args: SendTemplateMessageArgs): Promis
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   })
   if (!response.ok) await throwMetaError(response, `Meta API error: ${response.status}`)
-  const data = await response.json()
-  return { messageId: data.messages[0].id }
+  return readSendResult(response)
 }
 
 // ============================================================

@@ -93,7 +93,12 @@ export async function POST(request: Request): Promise<NextResponse> {
       leaseSeconds,
     })
 
+    // A post-provider persistence failure leaves the claim quarantined for
+    // reconciliation. Make the cron execution visibly fail; HTTP 200 would
+    // hide a permanently stuck job while the next tick cannot reclaim it.
+    const needsReconciliation = result.outcomes.some((outcome) => outcome.decision === 'erro_inesperado')
     return NextResponse.json({
+      ...(needsReconciliation ? { error: 'outbox_reconciliation_required' } : {}),
       mode: flags.mode,
       claimed: result.claimed,
       simulated: result.simulated,
@@ -102,7 +107,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       deadLettered: result.deadLettered,
       blocked: result.blocked,
       outcomes: result.outcomes,
-    })
+    }, { status: needsReconciliation ? 500 : 200 })
   } catch (err) {
     console.error('[whatsapp-oficial/outbox/run] batch failed:', err)
     return NextResponse.json({ error: 'outbox_run_failed' }, { status: 500 })

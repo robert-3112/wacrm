@@ -34,8 +34,8 @@ export async function GET(
   { params }: { params: Promise<{ mediaId: string }> },
 ): Promise<Response> {
   const { mediaId } = await params
-  if (!mediaId) {
-    return NextResponse.json({ error: 'Media ID is required' }, { status: 400 })
+  if (!/^\d{1,64}$/.test(mediaId)) {
+    return NextResponse.json({ error: 'Valid media ID is required' }, { status: 400 })
   }
 
   const supabase = await createClient()
@@ -53,7 +53,7 @@ export async function GET(
   const relayPath = `/api/whatsapp-oficial/media/${mediaId}`
   const { data: message, error: messageError } = await supabase
     .from('whatsapp_messages')
-    .select('id, conversation_id')
+    .select('id, tenant_id, conversation_id')
     .eq('media_url', relayPath)
     .maybeSingle()
 
@@ -71,6 +71,7 @@ export async function GET(
     .from('whatsapp_conversations')
     .select('canal_id')
     .eq('id', message.conversation_id as string)
+    .eq('tenant_id', message.tenant_id as string)
     .maybeSingle()
   if (conversationError || !conversation) {
     console.error(
@@ -84,6 +85,7 @@ export async function GET(
     .from('whatsapp_channels')
     .select('access_token_cifrado')
     .eq('id', conversation.canal_id as string)
+    .eq('tenant_id', message.tenant_id as string)
     .maybeSingle()
   if (channelError || !channel?.access_token_cifrado) {
     console.error('[whatsapp-oficial/media] channel or token missing:', channelError?.message)

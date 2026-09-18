@@ -54,7 +54,17 @@ export const ROTAS_PROTEGIDAS = [
 export const ROTAS_MORTAS = [
   '/api/whatsapp',
   '/api/automations',
+  '/api/account',
+  '/api/ai',
+  '/api/contacts',
+  '/api/flows',
+  '/api/invitations',
+  '/api/quick-replies',
+  '/api/v1/broadcasts',
+  '/api/v1/me',
+  '/api/v1/webhooks',
   '/signup',
+  '/join',
   '/dashboard',
   '/contacts',
   '/pipelines',
@@ -63,6 +73,7 @@ export const ROTAS_MORTAS = [
   '/flows',
   '/agents',
   '/settings',
+  '/notifications',
 ] as const
 
 /** Caminho exato ou descendente (`/x` ou `/x/…`) — o hífen não engana: `/api/whatsapp-oficial` passa. */

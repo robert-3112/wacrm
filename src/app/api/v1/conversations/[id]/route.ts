@@ -1,40 +1,51 @@
-// ============================================================
-// GET /api/v1/conversations/{id} — read one conversation
-// (scope: conversations:read). Account-scoped: a foreign id → 404.
-// ============================================================
+/** GET /api/v1/conversations/{id} — uma conversa oficial do tenant da chave. */
 
-import { requireApiKey } from '@/lib/auth/api-context';
-import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import {
-  CONVERSATION_SELECT,
-  normalizeConversation,
-} from '@/lib/inbox/conversations';
-import { serializeConversation } from '@/lib/api/v1/conversations';
-import type { Conversation } from '@/types';
+  apiV1BadRequest,
+  apiV1NotFound,
+  apiV1Ok,
+  requireApiKeyWithScope,
+  toApiV1Response,
+} from '@/lib/whatsapp-oficial/api-key-auth';
+import {
+  API_CONVERSATION_SELECT,
+  EMBED_TENANT_FILTER,
+  isUuid,
+  serializeConversation,
+  type RawConversationRow,
+} from '../../serialize';
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
-) {
+): Promise<Response> {
   try {
-    const ctx = await requireApiKey(request, 'conversations:read');
+    const ctx = await requireApiKeyWithScope(request, 'conversations:read');
     const { id } = await params;
+    if (!isUuid(id)) throw apiV1BadRequest('conversation id must be a UUID');
 
-    const { data, error } = await ctx.supabase
-      .from('conversations')
-      .select(CONVERSATION_SELECT)
+    // service_role ignora RLS. O filtro do tenant precisa existir tanto na conversa quanto no
+    // lead embutido; serializeConversation ainda valida o tenant do lead antes de publicá-lo.
+    const { data, error } = await ctx.admin
+      .from('whatsapp_conversations')
+      .select(API_CONVERSATION_SELECT)
+      .eq('tenant_id', ctx.tenantId)
       .eq('id', id)
-      .eq('account_id', ctx.accountId)
+      .eq(EMBED_TENANT_FILTER, ctx.tenantId)
       .maybeSingle();
 
     if (error) {
-      console.error('[api/v1/conversations] read error:', error);
-      return fail('internal', 'Failed to read conversation', 500);
+      console.error('[api/v1/conversations] falha ao ler:', error.message);
+      throw new Error(error.message);
     }
-    if (!data) return fail('not_found', 'Conversation not found', 404);
+    if (!data) throw apiV1NotFound('Conversation not found');
 
-    return ok(serializeConversation(normalizeConversation(data as Conversation)));
-  } catch (err) {
-    return toApiErrorResponse(err);
+    const response = apiV1Ok(
+      serializeConversation(data as unknown as RawConversationRow, ctx.escopos)
+    );
+    response.headers.set('Cache-Control', 'private, no-store');
+    return response;
+  } catch (error) {
+    return toApiV1Response(error);
   }
 }

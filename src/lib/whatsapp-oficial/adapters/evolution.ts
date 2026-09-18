@@ -17,6 +17,8 @@
 
 import type { AdapterSendResult, OutboundAdapter, OutboxJob } from './types'
 
+const SEND_TIMEOUT_MS = 15_000
+
 /** Thrown on any non-2xx response from the Evolution API. */
 export class EvolutionApiError extends Error {
   readonly httpStatus: number
@@ -64,6 +66,7 @@ async function send(args: { job: OutboxJob; credential: string }): Promise<Adapt
 
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     headers: {
       'Content-Type': 'application/json',
       apikey: credential,

@@ -27,7 +27,7 @@ export interface MetaApiErrorInfo {
   message?: string
 }
 
-export type OutboxErrorClass = 'retryable' | 'permanent'
+export type OutboxErrorClass = 'retryable' | 'permanent' | 'uncertain'
 
 export interface ClassifyResult {
   errorClass: OutboxErrorClass
@@ -82,15 +82,19 @@ const RETRYABLE_META_CODES = new Set<number>([
  * Classify a Meta Cloud API error as retryable or permanent.
  *
  * Priority: an explicit Meta `code` we recognize wins; otherwise fall
- * back to the HTTP status class (429/5xx → retryable, other 4xx →
- * permanent); an error with neither a recognized code nor a status (e.g.
- * a raw `fetch` network failure, DNS error, timeout) defaults to
- * retryable — infra hiccups are exactly the case retry exists for, and
- * treating unknown shapes as permanent would silently drop messages on
- * the first blip.
+ * back to the HTTP status class (429 → retryable, 5xx → uncertain,
+ * other 4xx → permanent). A network error, timeout, or malformed successful
+ * response is uncertain: the provider might have accepted the POST before
+ * the client lost the response. Repeating it could send a duplicate.
  */
 export function classifyMetaError(err: MetaApiErrorInfo): ClassifyResult {
   const { httpStatus, code } = err
+
+  // A 5xx can occur after the provider accepted the message. It overrides
+  // even a nominally retryable provider code until reconciliation proves no send.
+  if (httpStatus !== undefined && httpStatus >= 500) {
+    return { errorClass: 'uncertain', reason: 'resultado_incerto' }
+  }
 
   if (code !== undefined) {
     if (PERMANENT_META_CODES.has(code)) {
@@ -104,14 +108,11 @@ export function classifyMetaError(err: MetaApiErrorInfo): ClassifyResult {
   if (httpStatus === 429) {
     return { errorClass: 'retryable', reason: 'http_429' }
   }
-  if (httpStatus !== undefined && httpStatus >= 500) {
-    return { errorClass: 'retryable', reason: `http_${httpStatus}` }
-  }
   if (httpStatus !== undefined && httpStatus >= 400) {
     return { errorClass: 'permanent', reason: `http_${httpStatus}` }
   }
 
-  return { errorClass: 'retryable', reason: 'unknown_error_default_retryable' }
+  return { errorClass: 'uncertain', reason: 'resultado_incerto' }
 }
 
 const BASE_BACKOFF_MS = 30_000 // 30s
@@ -151,6 +152,35 @@ export interface ApplyOutboxFailureResult {
   deadLettered: boolean
 }
 
+/** Close only the row still owned by this claim. Count=0 is a lost claim,
+ * never a successful send/failure decision. This narrows stale-worker writes;
+ * claim recovery itself must be controlled by the database. */
+interface ClaimedUpdateQuery extends PromiseLike<{ error: unknown; count: number | null }> {
+  eq(column: string, value: string): ClaimedUpdateQuery
+}
+
+interface ClaimedUpdateClient {
+  from(table: string): {
+    update(values: Record<string, unknown>, options: { count: 'exact' }): ClaimedUpdateQuery
+  }
+}
+
+export async function updateClaimedOutbox(
+  supabase: SupabaseAdminLike,
+  outboxId: string,
+  workerId: string,
+  values: Record<string, unknown>,
+): Promise<void> {
+  const { error, count } = await (supabase as unknown as ClaimedUpdateClient)
+    .from('whatsapp_outbox')
+    .update(values, { count: 'exact' })
+    .eq('id', outboxId)
+    .eq('claimed_by', workerId)
+    .eq('status', 'processando')
+  if (error) throw error
+  if (count !== 1) throw new Error('outbox_claim_lost')
+}
+
 /**
  * Apply a send failure to a `whatsapp_outbox` row: classify the error,
  * then either dead-letter it (permanent error OR retry budget exhausted)
@@ -161,32 +191,39 @@ export async function applyOutboxFailure(
   row: OutboxRow,
   error: MetaApiErrorInfo,
   now: Date = new Date(),
+  workerId?: string,
 ): Promise<ApplyOutboxFailureResult> {
   const { errorClass, reason } = classifyMetaError(error)
   const nextAttempts = row.attempts + 1
   const budgetExhausted = nextAttempts >= row.max_attempts
-  const deadLetter = errorClass === 'permanent' || budgetExhausted
+  const deadLetter = errorClass !== 'retryable' || budgetExhausted
 
   const update: Record<string, unknown> = {
     attempts: nextAttempts,
-    last_error_code: error.code !== undefined ? String(error.code) : reason,
-    last_error_message: error.message ?? reason,
+    last_error_code: errorClass === 'uncertain' ? reason : error.code !== undefined ? String(error.code) : reason,
+    last_error_message: errorClass === 'uncertain' ? reason : error.message ?? reason,
     updated_at: now.toISOString(),
   }
 
   if (deadLetter) {
     update.status = 'morto'
     update.dead_letter_at = now.toISOString()
+    // next_retry_at is NOT NULL in the production schema. `morto` (and
+    // dead_letter_at) already exclude this row from the claim query.
   } else {
     update.status = 'falhou'
     update.next_retry_at = computeNextRetryAt(row.attempts, now).toISOString()
   }
 
-  const { error: dbError } = await supabase
-    .from('whatsapp_outbox')
-    .update(update)
-    .eq('id', row.id)
-  if (dbError) throw dbError
+  if (workerId) {
+    await updateClaimedOutbox(supabase, row.id, workerId, update)
+  } else {
+    const { error: dbError } = await supabase
+      .from('whatsapp_outbox')
+      .update(update)
+      .eq('id', row.id)
+    if (dbError) throw dbError
+  }
 
   return { errorClass, deadLettered: deadLetter }
 }
@@ -196,10 +233,16 @@ export async function applyOutboxSuccess(
   supabase: SupabaseAdminLike,
   row: Pick<OutboxRow, 'id'>,
   now: Date = new Date(),
+  workerId?: string,
 ): Promise<void> {
-  const { error } = await supabase
-    .from('whatsapp_outbox')
-    .update({ status: 'enviado', updated_at: now.toISOString() })
-    .eq('id', row.id)
-  if (error) throw error
+  const update = { status: 'enviado', updated_at: now.toISOString() }
+  if (workerId) {
+    await updateClaimedOutbox(supabase, row.id, workerId, update)
+  } else {
+    const { error } = await supabase
+      .from('whatsapp_outbox')
+      .update(update)
+      .eq('id', row.id)
+    if (error) throw error
+  }
 }

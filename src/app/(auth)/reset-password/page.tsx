@@ -15,6 +15,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { KeyRound, CheckCircle, ArrowLeft } from "lucide-react";
+import { ROTA_INICIAL } from "@/lib/rotas";
 
 /**
  * Define a senha nova depois do link do e-mail.
@@ -69,7 +70,7 @@ export default function ResetPasswordPage() {
 
     setPronto(true);
     setSalvando(false);
-    setTimeout(() => router.push("/dashboard"), 1800);
+    setTimeout(() => router.push(ROTA_INICIAL), 1800);
   };
 
   if (pronto) {

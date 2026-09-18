@@ -37,6 +37,7 @@ import { leadDisplayName } from "@/lib/whatsapp-oficial/inbox-data";
 import { registerHandoff, registerOptout, updateConversationStatus } from "@/lib/whatsapp-oficial/inbox-actions";
 import { MessageBubble } from "./message-bubble";
 import { MessageComposer } from "./message-composer";
+import { SophiaToggle } from "./sophia-toggle";
 import type {
   WhatsAppConversation,
   WhatsAppConversationStatus,
@@ -134,6 +135,7 @@ export function MessageThread({
       </div>
 
       <MessageComposer
+        key={conversation.id}
         conversationId={conversation.id}
         disabled={composerDisabled}
         disabledReason={composerDisabledReason}
@@ -224,7 +226,11 @@ function ThreadHeader({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end">
+        <SophiaToggle
+          conversationId={conversation.id}
+          onConversationChanged={onConversationChanged}
+        />
         <Button
           variant="outline"
           size="sm"

@@ -179,14 +179,18 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
   });
 
   const handleSelectConversation = useCallback((conversation: WhatsAppConversation) => {
+    activeIdRef.current = conversation.id;
     setActiveId((prev) => (prev === conversation.id ? prev : conversation.id));
   }, []);
 
   const handleBack = useCallback(() => {
+    activeIdRef.current = null;
     setActiveId(null);
   }, []);
 
   const handleMessageSent = useCallback((message: WhatsAppMessage) => {
+    // A slow upload can finish after the agent switches conversations.
+    if (message.conversation_id !== activeIdRef.current) return;
     setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
   }, []);
 

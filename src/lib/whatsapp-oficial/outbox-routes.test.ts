@@ -114,6 +114,22 @@ describe('POST /api/whatsapp-oficial/outbox/run', () => {
     expect(json.mode).toBe('shadow')
     expect(json.claimed).toBe(3)
   })
+
+  it('returns 500 with the batch result when a job needs reconciliation', async () => {
+    vi.stubEnv('WHATSAPP_OUTBOX_CRON_SECRET', CRON_SECRET)
+    mocks.processOutboxBatch.mockResolvedValue({
+      claimed: 1, simulated: 0, sent: 0, retried: 0, deadLettered: 0, blocked: 0,
+      outcomes: [{ outboxId: 'ob-1', decision: 'erro_inesperado', reason: 'reconciliacao_necessaria' }],
+    })
+
+    const res = await runRoute.POST(makeRequest({ headers: { 'x-cron-secret': CRON_SECRET } }))
+
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({
+      error: 'outbox_reconciliation_required',
+      outcomes: [{ outboxId: 'ob-1', decision: 'erro_inesperado' }],
+    })
+  })
 })
 
 describe('GET /api/whatsapp-oficial/health', () => {

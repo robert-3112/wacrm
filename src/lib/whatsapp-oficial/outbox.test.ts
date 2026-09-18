@@ -24,16 +24,16 @@ describe('classifyMetaError', () => {
     expect(classifyMetaError({ httpStatus: 429, code: 999999 })).toMatchObject({
       errorClass: 'retryable',
     })
-    expect(classifyMetaError({ httpStatus: 500 })).toMatchObject({ errorClass: 'retryable' })
-    expect(classifyMetaError({ httpStatus: 503 })).toMatchObject({ errorClass: 'retryable' })
+    expect(classifyMetaError({ httpStatus: 500 })).toMatchObject({ errorClass: 'uncertain', reason: 'resultado_incerto' })
+    expect(classifyMetaError({ httpStatus: 503, code: 2 })).toMatchObject({ errorClass: 'uncertain', reason: 'resultado_incerto' })
     expect(classifyMetaError({ httpStatus: 400 })).toMatchObject({ errorClass: 'permanent' })
     expect(classifyMetaError({ httpStatus: 404 })).toMatchObject({ errorClass: 'permanent' })
   })
 
-  it('defaults unknown-shape errors (e.g. network failure) to retryable', () => {
+  it('quarantines unknown network/timeout errors rather than repeating a possibly accepted POST', () => {
     expect(classifyMetaError({ message: 'fetch failed' })).toMatchObject({
-      errorClass: 'retryable',
-      reason: 'unknown_error_default_retryable',
+      errorClass: 'uncertain',
+      reason: 'resultado_incerto',
     })
   })
 })
@@ -78,7 +78,7 @@ describe('applyOutboxFailure', () => {
     const result = await applyOutboxFailure(
       supabase,
       { id: 'ob-1', attempts: 0, max_attempts: 5 },
-      { httpStatus: 500, message: 'server error' },
+      { httpStatus: 429, message: 'rate limited' },
       now,
     )
     expect(result).toEqual({ errorClass: 'retryable', deadLettered: false })
@@ -116,7 +116,7 @@ describe('applyOutboxFailure', () => {
     const result = await applyOutboxFailure(
       supabase,
       { id: 'ob-3', attempts: 4, max_attempts: 5 },
-      { httpStatus: 503, message: 'unavailable' },
+      { httpStatus: 429, message: 'rate limited' },
     )
     expect(result).toEqual({ errorClass: 'retryable', deadLettered: true })
     expect(updateCalls[0].values).toMatchObject({ status: 'morto', attempts: 5 })
@@ -135,5 +135,23 @@ describe('applyOutboxFailure', () => {
         httpStatus: 500,
       }),
     ).rejects.toThrow('db down')
+  })
+
+  it('quarantines an ambiguous 5xx with a stable code and without scheduling a retry', async () => {
+    const { supabase, updateCalls } = makeSupabaseMock()
+    const now = new Date('2026-01-01T00:00:00Z')
+    const result = await applyOutboxFailure(
+      supabase,
+      { id: 'ob-5', attempts: 0, max_attempts: 5 },
+      { httpStatus: 503, code: 2, message: 'upstream failed' },
+      now,
+    )
+    expect(result).toEqual({ errorClass: 'uncertain', deadLettered: true })
+    expect(updateCalls[0].values).toMatchObject({
+      status: 'morto', last_error_code: 'resultado_incerto', last_error_message: 'resultado_incerto',
+      dead_letter_at: now.toISOString(),
+    })
+    // Schema declares next_retry_at NOT NULL; status=morto is what removes claim eligibility.
+    expect(updateCalls[0].values).not.toHaveProperty('next_retry_at')
   })
 })
