@@ -1,48 +1,28 @@
 "use client";
 
 /**
- * Text-only composer for the official-channel inbox (Fase 6, mission item
- * 3). Calls the already-existing `POST /api/whatsapp-oficial/messages/send`
- * route (`src/lib/whatsapp-oficial/inbox-actions.ts#sendTextMessage`) —
- * that route ONLY inserts the message + enqueues `whatsapp_outbox`, it does
- * not call the Meta Graph API itself (see that route's doc comment), so a
- * successful response here means "queued", not "delivered"; delivery
- * status arrives later via the webhook → realtime → `MessageBubble`'s
- * status ticks.
- *
- * WRITTEN FROM SCRATCH for this mission — deliberately NOT a port of
- * `src/components/inbox/message-composer.tsx` (WACRM original): that
- * component's attach menu, voice recorder, AI draft button, template
- * picker and interactive-message builder are all out of scope here (no
- * media send in this phase, no templates/AI/interactive concept in this
- * schema at all). What's left after removing all of that is small enough
- * that porting the WACRM file and deleting 80% of it would have produced
- * more confusing code than writing the plain textarea+button this phase
- * actually needs.
- *
- * TODO (future phase, out of scope here — mission explicitly allows
- * deferring this: "Sem envio real de mídia nesta fase é aceitável"):
- * attachments (image/video/document/audio). `message-bubble.tsx` already
- * renders inbound media via the Fase 4 relay; only the send-side upload +
- * `POST /messages/send` media payload are missing.
+ * Text and guarded JPG/PNG/PDF composer for the official inbox. Both paths
+ * enqueue an outbox job; a successful response means queued, not delivered.
  */
 
-import { useCallback, useRef, useState, type KeyboardEvent } from "react";
-import { Loader2, Send } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Loader2, Paperclip, Send, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { sendTextMessage } from "@/lib/whatsapp-oficial/inbox-actions";
+import { asyncMediaAvailability, sendInboxMedia } from "@/lib/whatsapp-oficial/media-action";
 import type { WhatsAppMessage } from "@/types/whatsapp-oficial";
 
 const MAX_LENGTH = 4096;
+const MAX_CAPTION_LENGTH = 1024;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_PDF_BYTES = 16 * 1024 * 1024;
 const MAX_TEXTAREA_HEIGHT_PX = 120;
 
 interface MessageComposerProps {
   conversationId: string;
-  /** True when the conversation is closed or the lead has opted out — the
-   *  route itself doesn't block on either, but sending into either state
-   *  is not something the UI should make easy by accident. */
+  /** UI guard; the enqueue RPC rechecks these conditions atomically. */
   disabled?: boolean;
   disabledReason?: string;
   /**
@@ -70,8 +50,21 @@ export function MessageComposer({
   onSent,
 }: MessageComposerProps) {
   const [text, setText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [mediaAvailable, setMediaAvailable] = useState(false);
   const [sending, setSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRequestIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!envioReal) return;
+    let mounted = true;
+    void asyncMediaAvailability().then((available) => {
+      if (mounted) setMediaAvailable(available);
+    });
+    return () => { mounted = false; };
+  }, [envioReal]);
 
   const adjustHeight = useCallback(() => {
     const el = textareaRef.current;
@@ -82,11 +75,30 @@ export function MessageComposer({
 
   const handleSend = useCallback(async () => {
     const trimmed = text.trim();
-    if (!trimmed || sending || disabled) return;
+    if ((!trimmed && !file) || sending || disabled) return;
+
+    if (file && (!mediaAvailable || !envioReal)) {
+      toast.error("Envio de mídia indisponível neste momento.");
+      return;
+    }
 
     setSending(true);
-    const result = await sendTextMessage(conversationId, trimmed);
-    setSending(false);
+    let result;
+    try {
+      result = file
+        ? await sendInboxMedia(
+            conversationId,
+            mediaRequestIdRef.current ??= crypto.randomUUID(),
+            file,
+            trimmed,
+          )
+        : await sendTextMessage(conversationId, trimmed);
+    } catch {
+      toast.error("Falha inesperada ao enfileirar a mensagem.");
+      return;
+    } finally {
+      setSending(false);
+    }
 
     if (!result.ok) {
       toast.error(result.error);
@@ -94,9 +106,29 @@ export function MessageComposer({
     }
 
     setText("");
+    setFile(null);
+    mediaRequestIdRef.current = null;
+    if (fileInputRef.current) fileInputRef.current.value = "";
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     onSent(result.data.message);
-  }, [text, sending, disabled, conversationId, onSent]);
+  }, [text, file, sending, disabled, mediaAvailable, envioReal, conversationId, onSent]);
+
+  const handleFileSelected = useCallback((selected: File | undefined) => {
+    if (!selected) return;
+    const max = selected.type === "application/pdf" ? MAX_PDF_BYTES : MAX_IMAGE_BYTES;
+    if (!["image/jpeg", "image/png", "application/pdf"].includes(selected.type)) {
+      toast.error("Anexe somente JPG, PNG ou PDF.");
+    } else if (selected.size === 0 || selected.size > max) {
+      toast.error(`Arquivo vazio ou acima do limite de ${max / 1024 / 1024} MB.`);
+    } else if (text.length > MAX_CAPTION_LENGTH) {
+      toast.error("Reduza o texto para até 1024 caracteres antes de anexar.");
+    } else {
+      setFile(selected);
+      mediaRequestIdRef.current = null;
+      return;
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [text.length]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -113,19 +145,51 @@ export function MessageComposer({
       {disabled && disabledReason && (
         <p className="mb-2 text-xs text-muted-foreground">{disabledReason}</p>
       )}
+      {file && (
+        <div className="mb-2 flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-xs">
+          <Paperclip className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate" title={file.name}>{file.name}</span>
+          <Button
+            variant="ghost" size="icon-sm" disabled={sending}
+            aria-label="Remover anexo"
+            onClick={() => {
+              setFile(null);
+              mediaRequestIdRef.current = null;
+              if (fileInputRef.current) fileInputRef.current.value = "";
+            }}
+          ><X className="h-4 w-4" /></Button>
+        </div>
+      )}
       <div className="flex items-end gap-2">
+        {mediaAvailable && envioReal && (
+          <>
+            <input
+              ref={fileInputRef} type="file" className="sr-only"
+              accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+              aria-label="Selecionar imagem ou PDF"
+              onChange={(event) => handleFileSelected(event.target.files?.[0])}
+            />
+            <Button
+              size="icon" variant="outline" disabled={disabled || sending}
+              aria-label="Anexar JPG, PNG ou PDF"
+              onClick={() => fileInputRef.current?.click()}
+              className="h-9 w-9 shrink-0 rounded-xl"
+            ><Paperclip className="h-4 w-4" /></Button>
+          </>
+        )}
         <textarea
           ref={textareaRef}
           value={text}
           onChange={(e) => {
             setText(e.target.value);
+            if (file) mediaRequestIdRef.current = null;
             adjustHeight();
           }}
           onKeyDown={handleKeyDown}
           disabled={disabled || sending}
-          maxLength={MAX_LENGTH}
+          maxLength={file ? MAX_CAPTION_LENGTH : MAX_LENGTH}
           rows={1}
-          placeholder={disabled ? "Envio desabilitado" : "Escreva uma mensagem..."}
+          placeholder={disabled ? "Envio desabilitado" : file ? "Legenda (opcional)" : "Escreva uma mensagem..."}
           className={cn(
             "flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
             (disabled || sending) && "cursor-not-allowed opacity-60",
@@ -133,7 +197,7 @@ export function MessageComposer({
         />
         <Button
           size="icon"
-          disabled={!text.trim() || sending || disabled}
+          disabled={(!text.trim() && !file) || sending || disabled}
           onClick={() => void handleSend()}
           className="h-9 w-9 shrink-0 rounded-xl disabled:opacity-40"
           aria-label="Enviar mensagem"
@@ -147,9 +211,11 @@ export function MessageComposer({
           conversa, mas <strong>não chega ao cliente</strong>.
         </p>
       )}
-      <p className="mt-1 pl-1 text-[10px] text-muted-foreground">
-        Apenas texto nesta fase — envio de mídia ainda não é suportado.
-      </p>
+      {mediaAvailable && envioReal && (
+        <p className="mt-1 pl-1 text-[10px] text-muted-foreground">
+          JPG/PNG até 5 MB ou PDF até 16 MB. Disponível na janela de 24 horas.
+        </p>
+      )}
     </div>
   );
 }

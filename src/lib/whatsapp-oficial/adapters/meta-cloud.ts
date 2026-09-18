@@ -85,10 +85,29 @@ async function send(args: { job: OutboxJob; credential: string }): Promise<Adapt
     return { providerMessageId: result.messageId }
   }
 
+  const kind = asMediaKind(job.payload.message_type)
   const mediaUrl = asString(job.payload.media_url) ?? asString(job.payload.link)
-  if (mediaUrl) {
-    const kind = asMediaKind(job.payload.message_type)
-    if (!kind) throw new Error('meta_cloud adapter: missing or invalid message_type for media payload')
+  const mediaId = asString(job.payload.media_id)
+  if (kind) {
+    if (!mediaUrl && !mediaId) throw new Error('meta_cloud adapter: missing media_url or media_id for media payload')
+    if (mediaUrl && mediaId) throw new Error('meta_cloud adapter: ambiguous media reference')
+    if (mediaId && !/^\d+$/.test(mediaId)) throw new Error('meta_cloud adapter: invalid media_id')
+    if (mediaUrl) {
+      let url: URL
+      try {
+        url = new URL(mediaUrl)
+      } catch {
+        throw new Error('meta_cloud adapter: invalid media_url')
+      }
+      if (url.protocol !== 'https:' || !url.hostname || url.username || url.password ||
+          url.hostname === 'localhost' || url.hostname.endsWith('.localhost')) {
+        throw new Error('meta_cloud adapter: invalid media_url')
+      }
+    }
+    const caption = asString(job.payload.caption)
+    if (caption && caption.length > 1024) {
+      throw new Error('meta_cloud adapter: caption exceeds 1024 characters')
+    }
 
     const result = await sendMediaMessage({
       phoneNumberId,
@@ -96,10 +115,15 @@ async function send(args: { job: OutboxJob; credential: string }): Promise<Adapt
       to,
       kind,
       link: mediaUrl,
-      caption: asString(job.payload.caption),
+      mediaId,
+      caption,
       filename: asString(job.payload.filename),
     })
     return { providerMessageId: result.messageId }
+  }
+
+  if (mediaUrl || mediaId || (job.payload.message_type !== undefined && job.payload.message_type !== 'text')) {
+    throw new Error('meta_cloud adapter: missing or invalid message_type for media payload')
   }
 
   const content = asString(job.payload.content)

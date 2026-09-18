@@ -134,6 +134,7 @@ export function MessageThread({
       </div>
 
       <MessageComposer
+        key={conversation.id}
         conversationId={conversation.id}
         disabled={composerDisabled}
         disabledReason={composerDisabledReason}

@@ -64,6 +64,85 @@ describe('metaCloudAdapter.isConfigured', () => {
   })
 })
 
+describe('metaCloudAdapter media job guards', () => {
+  const base = { phone_number_id: 'PNID' }
+
+  it('never downgrades a media job without its link into a text message', async () => {
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'image', content: 'Legenda sem imagem' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('missing media_url')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-HTTPS media link before contacting Meta', async () => {
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'image', media_url: 'http://example.com/planta.jpg' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('invalid media_url')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects an oversized media caption before contacting Meta', async () => {
+    const job = makeJob({
+      ...base,
+      payload: {
+        message_type: 'image',
+        media_url: 'https://example.com/planta.jpg',
+        caption: 'a'.repeat(1025),
+      },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('caption exceeds')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends a valid HTTPS image as image with caption', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.media-1' }] }))
+    const job = makeJob({
+      ...base,
+      payload: {
+        message_type: 'image',
+        media_url: 'https://example.com/planta.jpg',
+        caption: 'Planta',
+      },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.media-1' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'image',
+      image: { link: 'https://example.com/planta.jpg', caption: 'Planta' },
+    })
+  })
+
+  it('sends a staged Meta media id without requiring a public URL', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.media-2' }] }))
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'document', media_id: '1234567890', filename: 'planta.pdf' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.media-2' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'document', document: { id: '1234567890', filename: 'planta.pdf' },
+    })
+  })
+
+  it('rejects media payloads with both ID and URL', async () => {
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'image', media_id: '1234567890', media_url: 'https://example.com/a.jpg' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('ambiguous media reference')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
 describe('evolutionAdapter.isConfigured', () => {
   it('is false without base_url or instance', () => {
     expect(
