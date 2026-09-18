@@ -226,7 +226,7 @@ function ThreadHeader({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end">
         <SophiaToggle
           conversationId={conversation.id}
           onConversationChanged={onConversationChanged}
