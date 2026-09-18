@@ -5,7 +5,12 @@ import { loadOverviewCounts } from './overview-data';
 function fakeClient(
   results: Record<string, { count: number | null; error: unknown }>
 ) {
-  const calls: Array<{ field: string; options: unknown; filter: string }> = [];
+  const calls: Array<{
+    field: string;
+    options: unknown;
+    filter: string;
+    tenant: string;
+  }> = [];
   const client = {
     from(table: string) {
       expect(table).toBe('whatsapp_conversations');
@@ -13,14 +18,20 @@ function fakeClient(
         select(field: string, options: unknown) {
           return {
             eq(column: string, value: string) {
-              const key = `${column}:${value}`;
-              calls.push({ field, options, filter: key });
-              return Promise.resolve(results[key]);
-            },
-            gt(column: string, value: number) {
-              const key = `${column}:>${value}`;
-              calls.push({ field, options, filter: key });
-              return Promise.resolve(results[key]);
+              expect(column).toBe('tenant_id');
+              expect(value).toBe('sunt');
+              return {
+                eq(filterColumn: string, filterValue: string) {
+                  const key = `${filterColumn}:${filterValue}`;
+                  calls.push({ field, options, filter: key, tenant: value });
+                  return Promise.resolve(results[key]);
+                },
+                gt(filterColumn: string, filterValue: number) {
+                  const key = `${filterColumn}:>${filterValue}`;
+                  calls.push({ field, options, filter: key, tenant: value });
+                  return Promise.resolve(results[key]);
+                },
+              };
             },
           };
         },
@@ -38,7 +49,7 @@ describe('loadOverviewCounts', () => {
       'nao_lidas_corretor:>0': { count: 2, error: null },
     });
 
-    await expect(loadOverviewCounts(client)).resolves.toEqual({
+    await expect(loadOverviewCounts(client, 'sunt')).resolves.toEqual({
       abertas: 7,
       pendentes: 3,
       naoLidas: 2,
@@ -50,16 +61,19 @@ describe('loadOverviewCounts', () => {
           field: 'id',
           options: { count: 'exact', head: true },
           filter: 'status:aberta',
+          tenant: 'sunt',
         },
         {
           field: 'id',
           options: { count: 'exact', head: true },
           filter: 'status:pendente',
+          tenant: 'sunt',
         },
         {
           field: 'id',
           options: { count: 'exact', head: true },
           filter: 'nao_lidas_corretor:>0',
+          tenant: 'sunt',
         },
       ])
     );
@@ -75,7 +89,7 @@ describe('loadOverviewCounts', () => {
       'nao_lidas_corretor:>0': { count: 2, error: null },
     });
 
-    await expect(loadOverviewCounts(client)).rejects.toThrow(
+    await expect(loadOverviewCounts(client, 'sunt')).rejects.toThrow(
       'Não foi possível carregar os indicadores'
     );
   });
@@ -87,7 +101,7 @@ describe('loadOverviewCounts', () => {
       'nao_lidas_corretor:>0': { count: 2, error: null },
     });
 
-    await expect(loadOverviewCounts(client)).rejects.toThrow(
+    await expect(loadOverviewCounts(client, 'sunt')).rejects.toThrow(
       'Não foi possível carregar os indicadores'
     );
   });
