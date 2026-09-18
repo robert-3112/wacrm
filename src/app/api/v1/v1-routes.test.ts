@@ -140,6 +140,7 @@ import { GET as getConversation } from './conversations/[id]/route'
 import { GET as getMessages } from './conversations/[id]/messages/route'
 import { GET as getMessage } from './messages/[id]/route'
 import { POST as postMessage } from './messages/route'
+import { POST as postSophiaClaim } from './sophia/claims/route'
 import { GET as getContacts } from './contacts/route'
 import { GET as getContact } from './contacts/[id]/route'
 
@@ -436,6 +437,55 @@ describe('403 — escopo ausente', () => {
     const res = await getHealth(req('/api/v1/health', CHAVE_A))
     expect(res.status).toBe(200)
     expect(await corpo(res)).toEqual({ data: { ok: true, tenant: 'sunt', escopos: [] } })
+  })
+})
+
+describe('POST /api/v1/sophia/claims', () => {
+  const claimRequest = (messageId: string, key = CHAVE_A) =>
+    req('/api/v1/sophia/claims', key, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: messageId }),
+    })
+
+  it('exige escopo exclusivo antes de tentar o claim', async () => {
+    const res = await postSophiaClaim(claimRequest(uuid(100)))
+    expect(res.status).toBe(403)
+    expect(await corpo(res)).toMatchObject({ required: 'sophia:process' })
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_sophia_claim_inbound', expect.anything())
+  })
+
+  it('aceita um claim e impede nova execução no redelivery', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['sophia:process'])
+    const old = rpc.getMockImplementation()!
+    let claimed = false
+    rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name !== 'whatsapp_sophia_claim_inbound') return old(name, args)
+      expect(args).toEqual({ p_message_id: uuid(100), p_api_key_id: 'key-a' })
+      if (claimed) return { data: { ok: false, reason: 'already_claimed' }, error: null }
+      claimed = true
+      return { data: { ok: true, claim_id: uuid(300), claim_token: `sc_${'a'.repeat(64)}` }, error: null }
+    })
+    const first = await postSophiaClaim(claimRequest(uuid(100)))
+    expect(first.status).toBe(201)
+    expect(first.headers.get('cache-control')).toBe('no-store')
+    expect(await corpo(first)).toEqual({ data: { claim_id: uuid(300), claim_token: `sc_${'a'.repeat(64)}` } })
+    const second = await postSophiaClaim(claimRequest(uuid(100)))
+    expect(second.status).toBe(409)
+    expect(await corpo(second)).toMatchObject({ error: 'already_claimed' })
+  })
+
+  it('não consulta o claim com UUID inválido e esconde outro tenant como 404', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['sophia:process'])
+    const invalid = await postSophiaClaim(claimRequest('not-a-uuid'))
+    expect(invalid.status).toBe(400)
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_sophia_claim_inbound', expect.anything())
+    const old = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (name: string, args: Record<string, unknown>) =>
+      name === 'whatsapp_sophia_claim_inbound'
+        ? { data: { ok: false, reason: 'mensagem_nao_encontrada' }, error: null }
+        : old(name, args))
+    const hidden = await postSophiaClaim(claimRequest(uuid(101, '2')))
+    expect(hidden.status).toBe(404)
   })
 })
 
