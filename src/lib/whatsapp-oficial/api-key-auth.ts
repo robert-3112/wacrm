@@ -43,6 +43,7 @@ export const API_V1_SCOPES = [
   'contacts:write',
   'broadcasts:send',
   'webhooks:manage',
+  'sophia:process',
 ] as const
 
 export type ApiV1Scope = (typeof API_V1_SCOPES)[number]
