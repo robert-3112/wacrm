@@ -38,7 +38,7 @@ const stagedMessage = {
 function makeAdmin(overrides: Record<string, unknown> = {}) {
   const rows: Record<string, unknown> = {
     whatsapp_messages: null,
-    whatsapp_conversations: { id: '11111111-1111-4111-8111-111111111111', status: 'aberta', optout_em: null },
+    whatsapp_conversations: { id: '11111111-1111-4111-8111-111111111111', status: 'aberta', optout_em: null, sophia_ativa: false },
     whatsapp_channels: { id: 'channel-1', tenant_id: 'sunt', provider: 'meta_cloud', status: 'ativo', phone_number_id: 'PNID' },
     leads: { id: 'lead-1', tenant_id: 'sunt', status_saida: 'ativo', whatsapp: '5511999999999' },
     inbound: { wpp_timestamp: NOW, created_at: NOW },
@@ -60,7 +60,9 @@ function makeAdmin(overrides: Record<string, unknown> = {}) {
       }
       return query
     }),
-    rpc: vi.fn().mockResolvedValue({ data: { ok: true, message: stagedMessage, replayed: false }, error: null }),
+    rpc: vi.fn().mockImplementation(async (name: string) => name === 'whatsapp_sophia_definir_estado'
+      ? { data: { ok: true, sophia_ativa: false, in_flight_replies: 0 }, error: null }
+      : { data: { ok: true, message: stagedMessage, replayed: false }, error: null }),
   }
   return admin
 }

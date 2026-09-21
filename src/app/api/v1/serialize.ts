@@ -72,7 +72,7 @@ export const EMBED_TENANT_FILTER = 'lead.tenant_id'
 
 export const API_MESSAGE_SELECT = `
   id, conversation_id, direction, message_type, content, media_mime_type,
-  status, wamid, created_at
+  status, wamid, wpp_timestamp, created_at
 `.trim()
 
 interface RawLead {
@@ -201,6 +201,7 @@ export interface RawMessageRow {
   media_mime_type?: string | null
   status?: string
   wamid?: string | null
+  wpp_timestamp?: string | null
   created_at: string
 }
 
@@ -215,6 +216,8 @@ export function serializeMessage(raw: RawMessageRow): Record<string, unknown> {
     status: raw.status ?? null,
     // Id da Meta. Só existe depois que o worker entrega de verdade; em shadow fica null.
     wamid: raw.wamid ?? null,
+    // Provider time stays separate from insertion time (which can reflect a delayed webhook).
+    wpp_timestamp: raw.wpp_timestamp ?? null,
     created_at: raw.created_at,
   }
 }
