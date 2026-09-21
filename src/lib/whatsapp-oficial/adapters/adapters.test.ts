@@ -16,6 +16,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 function jsonResponse(body: unknown, status = 200) {
@@ -63,6 +64,111 @@ describe('metaCloudAdapter.isConfigured', () => {
   })
 })
 
+describe('metaCloudAdapter media job guards', () => {
+  const base = { phone_number_id: 'PNID' }
+
+  it('never downgrades a media job without its link into a text message', async () => {
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'image', content: 'Legenda sem imagem' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('missing media_url')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-HTTPS media link before contacting Meta', async () => {
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'image', media_url: 'http://example.com/planta.jpg' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('invalid media_url')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects an oversized media caption before contacting Meta', async () => {
+    const job = makeJob({
+      ...base,
+      payload: {
+        message_type: 'image',
+        media_url: 'https://example.com/planta.jpg',
+        caption: 'a'.repeat(1025),
+      },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('caption exceeds')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends a valid HTTPS image as image with caption', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.media-1' }] }))
+    const job = makeJob({
+      ...base,
+      payload: {
+        message_type: 'image',
+        media_url: 'https://example.com/planta.jpg',
+        caption: 'Planta',
+      },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.media-1' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'image',
+      image: { link: 'https://example.com/planta.jpg', caption: 'Planta' },
+    })
+  })
+
+  it('sends a staged Meta media id without requiring a public URL', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.media-2' }] }))
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'document', media_id: '1234567890', filename: 'planta.pdf' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.media-2' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'document', document: { id: '1234567890', filename: 'planta.pdf' },
+    })
+  })
+
+  it('rejects media payloads with both ID and URL', async () => {
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'image', media_id: '1234567890', media_url: 'https://example.com/a.jpg' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .rejects.toThrow('ambiguous media reference')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends an MP3 media ID without an unsupported caption', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.audio-1' }] }))
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'audio', media_id: '1234567890' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.audio-1' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'audio', audio: { id: '1234567890' },
+    })
+  })
+
+  it('sends an MP4 media ID with a caption', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.video-1' }] }))
+    const job = makeJob({
+      ...base,
+      payload: { message_type: 'video', media_id: '1234567890', caption: 'Tour' },
+    })
+    await expect(metaCloudAdapter.send({ job, credential: 'test-token' }))
+      .resolves.toEqual({ providerMessageId: 'wamid.video-1' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      type: 'video', video: { id: '1234567890', caption: 'Tour' },
+    })
+  })
+})
+
 describe('evolutionAdapter.isConfigured', () => {
   it('is false without base_url or instance', () => {
     expect(
@@ -93,6 +199,7 @@ describe('evolutionAdapter.send', () => {
   const secretApiKey = 'super-secret-evolution-key'
 
   it('posts to /message/sendText/{instance} with the apikey header and extracts data.key.id', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     fetchMock.mockResolvedValueOnce(jsonResponse({ key: { id: 'EVO-MSG-1' } }))
 
     const job = makeJob({
@@ -109,6 +216,8 @@ describe('evolutionAdapter.send', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://evo.example.com/message/sendText/minha-instancia')
     expect(init.headers).toMatchObject({ apikey: secretApiKey })
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000)
+    expect(init.signal).toBeInstanceOf(AbortSignal)
     const body = JSON.parse(init.body as string)
     expect(body).toEqual({ number: '5511999999999', text: 'ola mundo' })
   })
@@ -126,7 +235,7 @@ describe('evolutionAdapter.send', () => {
     expect(result).toEqual({ providerMessageId: 'EVO-MSG-2' })
   })
 
-  it('throws EvolutionApiError with httpStatus 500 on a 5xx response, classified as retryable', async () => {
+  it('throws EvolutionApiError with httpStatus 500 on a 5xx response, classified as uncertain', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'internal error' }, 500))
 
     const job = makeJob({
@@ -144,7 +253,7 @@ describe('evolutionAdapter.send', () => {
 
     expect(caught).toBeInstanceOf(EvolutionApiError)
     expect((caught as EvolutionApiError).httpStatus).toBe(500)
-    expect(classifyMetaError(caught as EvolutionApiError)).toMatchObject({ errorClass: 'retryable' })
+    expect(classifyMetaError(caught as EvolutionApiError)).toMatchObject({ errorClass: 'uncertain' })
     expect(String(caught)).not.toContain(secretApiKey)
   })
 

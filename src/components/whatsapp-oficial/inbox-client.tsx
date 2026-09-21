@@ -179,14 +179,18 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
   });
 
   const handleSelectConversation = useCallback((conversation: WhatsAppConversation) => {
+    activeIdRef.current = conversation.id;
     setActiveId((prev) => (prev === conversation.id ? prev : conversation.id));
   }, []);
 
   const handleBack = useCallback(() => {
+    activeIdRef.current = null;
     setActiveId(null);
   }, []);
 
   const handleMessageSent = useCallback((message: WhatsAppMessage) => {
+    // A slow upload can finish after the agent switches conversations.
+    if (message.conversation_id !== activeIdRef.current) return;
     setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
   }, []);
 
@@ -200,8 +204,8 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     <div className="flex h-full overflow-hidden">
       <div
         className={cn(
-          "h-full lg:flex lg:flex-none",
-          hasActiveConversation ? "hidden lg:flex" : "flex flex-1",
+          "h-full xl:flex xl:flex-none",
+          hasActiveConversation ? "hidden xl:flex" : "flex flex-1",
         )}
       >
         <ConversationList
@@ -214,8 +218,8 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
 
       <div
         className={cn(
-          "h-full min-w-0 flex-1 lg:flex",
-          hasActiveConversation ? "flex" : "hidden lg:flex",
+          "h-full min-w-0 flex-1 xl:flex",
+          hasActiveConversation ? "flex" : "hidden xl:flex",
         )}
       >
         <MessageThread

@@ -229,7 +229,7 @@ export function CampanhaDetalheClient({
     setMotivo("");
     const feito: Record<AcaoCampanha, string> = {
       aprovar: "Campanha aprovada. O dispatch pode enfileirar lotes — nada sai sem os kill switches.",
-      pausar: "Campanha pausada. O dispatch para de enfileirar novos lotes.",
+      pausar: "Campanha pausada. Novos lotes param e itens na fila aguardam a retomada.",
       retomar: "Campanha retomada.",
       cancelar: `Campanha cancelada. ${r.data.itens_cancelados ?? 0} item(ns) pendente(s) cancelado(s).`,
     };
@@ -461,7 +461,7 @@ export function CampanhaDetalheClient({
             <DialogDescription>
               {dialogoMotivo === "cancelar"
                 ? "Cancelar é definitivo: além de mudar o status, os destinatários que ainda não saíram são cancelados."
-                : "Pausar só faz o dispatch parar de enfileirar novos lotes. O que já está na outbox segue o destino que o worker der."}
+                 : "Pausar interrompe novos lotes e retém itens ainda na fila. Um envio já iniciado pode terminar após a pausa."}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-1.5">

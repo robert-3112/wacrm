@@ -9,9 +9,11 @@ import {
   checkRateLimit,
   rateLimitResponse,
 } from '@/lib/whatsapp-oficial/rate-limit'
+import { pauseSophiaForHumanSend } from '@/lib/whatsapp-oficial/sophia-pause'
 
 /**
- * Queue a text reply for an official-channel conversation.
+ * Queue a text reply for an official-channel conversation. The request is
+ * intentionally text-only until media has its own atomic enqueue RPC.
  *
  * Authorization is checked twice:
  * 1. `requireConversationAccess` proves the user can see the conversation via RLS.
@@ -31,6 +33,10 @@ interface SendMessageBody {
 export async function POST(request: Request): Promise<Response> {
   try {
     const body = (await request.json().catch(() => null)) as SendMessageBody | null
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).some((key) => key !== 'conversationId' && key !== 'content')) {
+      throw new BadRequestError('Only conversationId and content are supported for text messages')
+    }
     const conversationId = typeof body?.conversationId === 'string' ? body.conversationId : ''
     const content = typeof body?.content === 'string' ? body.content.trim() : ''
 
@@ -47,6 +53,9 @@ export async function POST(request: Request): Promise<Response> {
       WHATSAPP_OFICIAL_RATE_LIMITS.messageSend,
     )
     if (!rl.success) return rateLimitResponse(rl)
+
+    const sophia = await pauseSophiaForHumanSend(admin, conversation, userId)
+    if (sophia instanceof Response) return sophia
 
     const { data, error } = await admin.rpc('whatsapp_oficial_enfileirar_mensagem', {
       p_conversation_id: conversation.id,
@@ -74,7 +83,7 @@ export async function POST(request: Request): Promise<Response> {
       return NextResponse.json({ error: result?.reason ?? 'message_enqueue_rejected' }, { status })
     }
 
-    return NextResponse.json({ ok: true, message: result.message }, { status: 201 })
+    return NextResponse.json({ ok: true, message: result.message, ...sophia }, { status: 201 })
   } catch (error) {
     return toErrorResponse(error)
   }

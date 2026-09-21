@@ -36,6 +36,7 @@ export async function GET(request: Request): Promise<Response> {
       // a base inteira de leads do tenant, com `[]` no lugar da conversa.
       .select(`${API_LEAD_FIELDS}, whatsapp_conversations!inner ( id )`)
       .eq('tenant_id', ctx.tenantId)
+      .eq('whatsapp_conversations.tenant_id', ctx.tenantId)
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
       .limit(limit + 1)

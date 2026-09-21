@@ -4,6 +4,7 @@ import {
   downloadMedia,
   getMediaUrl,
   sendMediaMessage,
+  uploadMedia,
   sendTemplateMessage,
   sendTextMessage,
 } from './meta-api'
@@ -19,6 +20,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 function jsonResponse(body: unknown, status = 200) {
@@ -31,6 +33,7 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe('sendTextMessage', () => {
   it('posts the expected payload and returns the Meta message id', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.TEXT1' }] }))
 
     const result = await sendTextMessage({
@@ -45,6 +48,8 @@ describe('sendTextMessage', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('https://graph.facebook.com/v24.0/PNID/messages')
     expect(init.headers).toMatchObject({ Authorization: 'Bearer tok' })
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000)
+    expect(init.signal).toBeInstanceOf(AbortSignal)
     const body = JSON.parse(init.body as string)
     expect(body).toMatchObject({
       messaging_product: 'whatsapp',
@@ -67,6 +72,13 @@ describe('sendTextMessage', () => {
       code: 100,
       httpStatus: 400,
     })
+  })
+
+  it('treats a 2xx response without a message id as an uncertain outcome', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [] }))
+    await expect(
+      sendTextMessage({ phoneNumberId: 'PNID', accessToken: 'tok', to: '551199', text: 'x' }),
+    ).rejects.toThrow('meta_api_missing_message_id')
   })
 })
 
@@ -131,6 +143,46 @@ describe('sendMediaMessage — audio caption/filename rule', () => {
       }),
     ).rejects.toThrow('requires a link')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends uploaded media by id without a public link', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [{ id: 'wamid.MEDIA1' }] }))
+    await sendMediaMessage({
+      phoneNumberId: 'PNID', accessToken: 'tok', to: '5511999999999',
+      kind: 'image', mediaId: '1234567890', caption: 'Planta',
+    })
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.image).toEqual({ id: '1234567890', caption: 'Planta' })
+  })
+
+  it('rejects an ambiguous media reference before contacting Meta', async () => {
+    await expect(sendMediaMessage({
+      phoneNumberId: 'PNID', accessToken: 'tok', to: '5511999999999',
+      kind: 'image', mediaId: '1234567890', link: 'https://example.com/a.jpg',
+    })).rejects.toThrow('exactly one')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('uploadMedia', () => {
+  it('uploads a file to the Meta media endpoint and returns its media id', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: '1234567890' }))
+    const file = new File(['%PDF-test'], 'planta.pdf', { type: 'application/pdf' })
+    await expect(uploadMedia({ phoneNumberId: 'PNID', accessToken: 'tok', file }))
+      .resolves.toEqual({ mediaId: '1234567890' })
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://graph.facebook.com/v24.0/PNID/media')
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer tok' })
+    expect(init.body).toBeInstanceOf(FormData)
+    expect((init.body as FormData).get('messaging_product')).toBe('whatsapp')
+    expect((init.body as FormData).get('file')).toBeInstanceOf(File)
+  })
+
+  it('rejects a successful upload response without an id', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}))
+    const file = new File(['%PDF-test'], 'planta.pdf', { type: 'application/pdf' })
+    await expect(uploadMedia({ phoneNumberId: 'PNID', accessToken: 'tok', file }))
+      .rejects.toThrow('meta_api_missing_media_id')
   })
 })
 

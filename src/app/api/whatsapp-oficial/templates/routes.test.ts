@@ -47,6 +47,11 @@ vi.mock('@/lib/whatsapp-oficial/supabase-admin', () => ({
   supabaseAdmin: mocks.supabaseAdmin,
 }))
 
+// A pausa da Sophia tem teste próprio (sophia-pause.test.ts); aqui ela é neutra.
+vi.mock('@/lib/whatsapp-oficial/sophia-pause', () => ({
+  pauseSophiaForHumanSend: vi.fn(async () => ({ sophia_pausada: false, in_flight_replies: 0 })),
+}))
+
 import { UnauthorizedError, NotFoundError } from '@/lib/whatsapp-oficial/api-auth'
 import { GET as listarTemplates } from './route'
 import { POST as sincronizarTemplates } from './sync/route'

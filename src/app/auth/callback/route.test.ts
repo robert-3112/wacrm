@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { destinoSeguro } from './route'
+import { ROTA_INICIAL } from '@/lib/rotas'
 
 /**
  * `next` chega pela URL do link do e-mail, ou seja, do lado de fora. Um
@@ -14,8 +15,8 @@ describe('destinoSeguro', () => {
   })
 
   it('cai no padrão quando não vem nada', () => {
-    expect(destinoSeguro(null)).toBe('/dashboard')
-    expect(destinoSeguro('')).toBe('/dashboard')
+    expect(destinoSeguro(null)).toBe(ROTA_INICIAL)
+    expect(destinoSeguro('')).toBe(ROTA_INICIAL)
   })
 
   it.each([
@@ -26,6 +27,6 @@ describe('destinoSeguro', () => {
     ['javascript:alert(1)', 'esquema javascript'],
     ['dashboard', 'relativo sem barra inicial'],
   ])('recusa %s (%s)', (entrada) => {
-    expect(destinoSeguro(entrada)).toBe('/dashboard')
+    expect(destinoSeguro(entrada)).toBe(ROTA_INICIAL)
   })
 })

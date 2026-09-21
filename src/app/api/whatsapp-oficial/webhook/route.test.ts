@@ -771,6 +771,31 @@ describe('POST /api/whatsapp-oficial/webhook — status transitions never regres
 })
 
 describe('POST /api/whatsapp-oficial/webhook — template lifecycle', () => {
+  it('propaga evento de template para todos os números do mesmo WABA e tenant', async () => {
+    const secondChannel = { ...CHANNEL, id: 'chan-2', phone_number_id: 'PNID-2' }
+    fakeDb.state.channels.push(secondChannel)
+    fakeDb.state.templates.push({ ...TEMPLATE, id: 'tpl-2', canal_id: secondChannel.id })
+
+    const res = await postWebhook(
+      metaTemplatePayload('message_template_status_update', {
+        event: 'APPROVED',
+        message_template_name: 'boas_vindas',
+        message_template_language: 'pt_BR',
+      }),
+    )
+
+    expect(res.status).toBe(200)
+    expect(fakeDb.state.templateRpcCalls.map((call) => call.p_canal_id).sort()).toEqual([
+      CHANNEL.id,
+      secondChannel.id,
+    ])
+    expect(fakeDb.state.templates.map((template) => template.status_aprovacao)).toEqual([
+      'aprovado',
+      'aprovado',
+    ])
+    expect(fakeDb.state.webhookEvents).toHaveLength(2)
+  })
+
   it('status update chama a RPC com nome/idioma/status/motivo e aplica no template', async () => {
     const res = await postWebhook(
       metaTemplatePayload('message_template_status_update', {

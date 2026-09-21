@@ -13,6 +13,7 @@ import {
   TEMPLATE_MAX_TAMANHO_VALOR,
   TEMPLATE_MAX_VALORES,
 } from '@/lib/whatsapp-oficial/meta-templates'
+import { pauseSophiaForHumanSend } from '@/lib/whatsapp-oficial/sophia-pause'
 
 /**
  * Enfileira UM template aprovado numa conversa — o botão "enviar teste" e
@@ -157,6 +158,9 @@ export async function POST(request: Request): Promise<Response> {
     const acimaDoTeto = recusarVariaveisAcimaDoTeto(variaveis)
     if (acimaDoTeto) return acimaDoTeto
 
+    const sophia = await pauseSophiaForHumanSend(admin, conversation, userId)
+    if (sophia instanceof Response) return sophia
+
     const { data, error } = await admin.rpc('whatsapp_oficial_enfileirar_template', {
       p_conversation_id: conversation.id,
       p_template_id: templateId,
@@ -191,6 +195,7 @@ export async function POST(request: Request): Promise<Response> {
         messageId: result.message_id,
         templateId: result.template_id ?? templateId,
         preview: result.preview ?? null,
+        ...sophia,
       },
       { status: 201 },
     )

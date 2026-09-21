@@ -19,6 +19,7 @@ import {
   CheckCircle2,
   CircleSlash,
   Loader2,
+  Plus,
   RefreshCw,
   Search,
 } from "lucide-react";
@@ -28,6 +29,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -43,6 +46,7 @@ import {
   templatePodeEnviar,
 } from "@/lib/whatsapp-oficial/gestao-erros";
 import { CanalPicker } from "./canal-picker";
+import { extractVariableIndices } from "@/lib/whatsapp-oficial/meta-templates";
 import { TemplatePreviewPanel } from "./template-preview-panel";
 import type {
   TemplateSyncResultado,
@@ -89,6 +93,15 @@ export function TemplatesClient({ canais }: { canais: WhatsAppCanal[] }) {
   const [sincronizando, setSincronizando] = useState(false);
   const [resultadoSync, setResultadoSync] = useState<TemplateSyncResultado | null>(null);
   const [erroSync, setErroSync] = useState<string | null>(null);
+  const [criarAberto, setCriarAberto] = useState(false);
+  const [nomeNovo, setNomeNovo] = useState("");
+  const [categoriaNova, setCategoriaNova] = useState<"MARKETING" | "UTILITY">("MARKETING");
+  const [corpoNovo, setCorpoNovo] = useState("");
+  const [rodapeNovo, setRodapeNovo] = useState("");
+  const [exemplosNovos, setExemplosNovos] = useState<string[]>([]);
+  const [criando, setCriando] = useState(false);
+  const [erroCriacao, setErroCriacao] = useState<string | null>(null);
+  const variaveisNovas = useMemo(() => extractVariableIndices(corpoNovo), [corpoNovo]);
 
   const canal = useMemo(() => canais.find((c) => c.id === canalId) ?? null, [canais, canalId]);
   const abortRef = useRef<AbortController | null>(null);
@@ -168,10 +181,73 @@ export function TemplatesClient({ canais }: { canais: WhatsAppCanal[] }) {
     void carregar(canalId, status);
   };
 
+  const handleCreate = async () => {
+    if (!canalId || criando) return;
+    setCriando(true);
+    setErroCriacao(null);
+    try {
+      const response = await fetch("/api/whatsapp-oficial/templates/criar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ canalId, name: nomeNovo, category: categoriaNova, body: corpoNovo,
+          footer: rodapeNovo, examples: variaveisNovas.map((_, index) => exemplosNovos[index] ?? "") }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        setErroCriacao(typeof result.error === "string" ? result.error : "Não foi possível submeter o template.");
+        return;
+      }
+      setCriarAberto(false);
+      setNomeNovo(""); setCorpoNovo(""); setRodapeNovo(""); setExemplosNovos([]);
+      toast.success("Template submetido à Meta. A aprovação ainda está pendente.");
+      await handleSync();
+    } catch {
+      setErroCriacao("Não foi possível consultar a Meta. Confira o catálogo antes de repetir.");
+    } finally {
+      setCriando(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <CanalPicker canais={canais} canalId={canalId} onChange={setCanalId} />
+        <div className="flex flex-wrap gap-2">
+        <Dialog open={criarAberto} onOpenChange={setCriarAberto}>
+          <DialogTrigger render={<Button size="sm" disabled={!podeSincronizar} />}>
+            <Plus data-icon="inline-start" /> Criar template
+          </DialogTrigger>
+          <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Novo template de texto</DialogTitle>
+              <DialogDescription>Submeta em português do Brasil. A Meta analisará o conteúdo antes de permitir o envio.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="space-y-1"><Label htmlFor="template-nome">Nome interno</Label>
+                <Input id="template-nome" value={nomeNovo} onChange={(e) => setNomeNovo(e.target.value)} placeholder="exemplo_investimento" maxLength={128} /></div>
+              <div className="space-y-1"><Label htmlFor="template-categoria">Categoria</Label>
+                <Select value={categoriaNova} onValueChange={(value) => setCategoriaNova(value as "MARKETING" | "UTILITY")}>
+                  <SelectTrigger id="template-categoria"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="MARKETING">Marketing</SelectItem><SelectItem value="UTILITY">Utilidade</SelectItem></SelectContent>
+                </Select></div>
+              <div className="space-y-1"><Label htmlFor="template-corpo">Mensagem</Label>
+                <Textarea id="template-corpo" value={corpoNovo} onChange={(e) => setCorpoNovo(e.target.value)} maxLength={1024} rows={5} placeholder="Olá, {{1}}. Temos uma oportunidade para você..." />
+                <p className="text-xs text-muted-foreground">Use variáveis sequenciais: {"{{1}}"}, {"{{2}}"}...</p></div>
+              {variaveisNovas.map((indice, position) => (
+                <div key={indice} className="space-y-1"><Label htmlFor={`template-exemplo-${indice}`}>Exemplo para {`{{${indice}}}`}</Label>
+                  <Input id={`template-exemplo-${indice}`} value={exemplosNovos[position] ?? ""} maxLength={128}
+                    onChange={(e) => setExemplosNovos((current) => { const next = [...current]; next[position] = e.target.value; return next; })} />
+                </div>
+              ))}
+              <div className="space-y-1"><Label htmlFor="template-rodape">Rodapé opcional</Label>
+                <Input id="template-rodape" value={rodapeNovo} onChange={(e) => setRodapeNovo(e.target.value)} maxLength={60} /></div>
+              {erroCriacao && <p role="alert" className="text-sm text-destructive">{erroCriacao}</p>}
+            </div>
+            <DialogFooter><Button onClick={() => void handleCreate()} disabled={criando || !corpoNovo.trim()}>
+              {criando && <Loader2 data-icon="inline-start" className="animate-spin" />} Submeter à Meta
+            </Button></DialogFooter>
+          </DialogContent>
+        </Dialog>
         <Button size="sm" onClick={() => void handleSync()} disabled={sincronizando || !podeSincronizar}>
           {sincronizando ? (
             <Loader2 data-icon="inline-start" className="animate-spin" />
@@ -180,6 +256,7 @@ export function TemplatesClient({ canais }: { canais: WhatsAppCanal[] }) {
           )}
           Sincronizar com a Meta
         </Button>
+        </div>
       </div>
 
       {!podeSincronizar && canal && (

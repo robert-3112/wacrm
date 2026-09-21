@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { resolvePublicBaseUrl } from '@/lib/base-url'
+import { ROTA_INICIAL } from '@/lib/rotas'
 
 /**
  * Troca o `code` do e-mail por uma sessão e segue para `next`.
@@ -24,8 +25,8 @@ import { resolvePublicBaseUrl } from '@/lib/base-url'
  * navegador trata os dois como protocol-relative e sairia do domínio.
  */
 export function destinoSeguro(next: string | null): string {
-  if (!next || !next.startsWith('/')) return '/dashboard'
-  if (next.startsWith('//') || next.startsWith('/\\')) return '/dashboard'
+  if (!next || !next.startsWith('/')) return ROTA_INICIAL
+  if (next.startsWith('//') || next.startsWith('/\\')) return ROTA_INICIAL
   return next
 }
 

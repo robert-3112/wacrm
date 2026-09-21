@@ -9,9 +9,9 @@ import {
 /**
  * Pausa uma campanha em andamento — o botão de freio do operador.
  *
- * Pausar só muda o status: o dispatch para de enfileirar novos lotes, mas o
- * que já está na outbox segue o destino que o worker der. É por isso que
- * cancelar existe separado (aquele sim cancela os itens pendentes).
+ * A RPC altera o status; o dispatch para de enfileirar novos lotes e o worker
+ * retém itens ainda na fila ao reler esse status. Um envio já iniciado no
+ * provedor pode terminar depois da pausa.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

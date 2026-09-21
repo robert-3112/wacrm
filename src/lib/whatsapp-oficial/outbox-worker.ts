@@ -21,13 +21,14 @@
  *   b) linked message already terminal -> outbox 'enviado', don't resend
  *   c) broadcast kill switch      -> requeue (defense in depth: the claim
  *      RPC already filters this, this is the second barrier)
- *   d) shadow mode / provider off -> 'simulado', no network, no credential
- *   e) pilot allowlist (LIVE ONLY) -> requeue (a temporary condition, not a
+ *   d) campaign status             -> requeue paused/unknown, cancel cancelled
+ *   e) shadow mode / provider off -> 'simulado', no network, no credential
+ *   f) pilot allowlist (LIVE ONLY) -> requeue (a temporary condition, not a
  *      permanent one — the number may be allowlisted later). It sits after
  *      the shadow branch because it protects a real RECIPIENT, and in shadow
  *      there is no recipient; the shadow audit row records what the live
  *      allowlist decision would have been.
- *   f) live                       -> load the credential now (ONLY here),
+ *   g) live                       -> load the credential now (ONLY here),
  *      call the adapter, then apply success/failure through the shared
  *      classification + backoff helpers in `./outbox.ts`
  *
@@ -42,7 +43,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-import { applyOutboxFailure, applyOutboxSuccess, type MetaApiErrorInfo } from './outbox'
+import { applyOutboxFailure, applyOutboxSuccess, updateClaimedOutbox, type MetaApiErrorInfo } from './outbox'
 import { isSendEnabledFor, type WhatsappFlags } from './env-flags'
 import { isAllowlisted } from './allowlist'
 import { isInsideFreeFormWindow } from './meta-window'
@@ -134,19 +135,33 @@ async function registrarAuditoria(admin: SupabaseClient, input: AuditInput): Pro
 async function updateOutbox(
   admin: SupabaseClient,
   outboxId: string,
+  workerId: string,
   values: Record<string, unknown>,
 ): Promise<void> {
-  const { error } = await admin.from('whatsapp_outbox').update(values).eq('id', outboxId)
-  if (error) throw error
+  await updateClaimedOutbox(admin, outboxId, workerId, values)
 }
 
 async function updateMessage(
   admin: SupabaseClient,
-  messageId: string,
+  job: OutboxJob,
   values: Record<string, unknown>,
 ): Promise<void> {
-  const { error } = await admin.from('whatsapp_messages').update(values).eq('id', messageId)
+  if (!job.message_id || !job.conversation_id) throw new Error('invalid_linked_message')
+  // A receipt may arrive before this write. Never move entregue/lida back to
+  // enviada (or falhou) because the provider response finished later.
+  const { error, count } = await admin
+    .from('whatsapp_messages')
+    .update(values, { count: 'exact' })
+    .eq('id', job.message_id)
+    .eq('tenant_id', job.tenant_id)
+    .eq('conversation_id', job.conversation_id)
+    .in('status', ['pendente', 'falhou'])
   if (error) throw error
+  if (count === 1) return
+  // Count=0 is acceptable only if a receipt already made this SAME linked
+  // message terminal. Any other case remains claimed for reconciliation.
+  if (count === 0 && (await readLinkedMessageState(admin, job)) === 'terminal') return
+  throw new Error('linked_message_update_not_applied')
 }
 
 const TERMINAL_MESSAGE_STATUSES = new Set(['entregue', 'lida', 'enviada'])
@@ -154,23 +169,32 @@ const TERMINAL_MESSAGE_STATUSES = new Set(['entregue', 'lida', 'enviada'])
 /**
  * Read-only check used by barrier (b) — never touched for jobs with no `message_id`.
  *
- * Throws on a read error instead of assuming "not terminal". Assuming
- * not-terminal would let a transient database hiccup turn into a DUPLICATE
- * SEND to a real customer, which is strictly worse than a delayed one: the
- * throw is caught by the per-job handler in `processOutboxBatch`, the row
- * stays `processando`, and the lease expiry hands it back to a later run.
+ * Throws on a read error instead of assuming "not terminal". The row stays
+ * out of the provider path; the outer worker safely requeues it before any
+ * provider contact. A transient database hiccup must never authorize a send.
  */
-async function isMessageTerminal(admin: SupabaseClient, messageId: string): Promise<boolean> {
+async function readLinkedMessageState(
+  admin: SupabaseClient,
+  job: OutboxJob,
+): Promise<'pending' | 'terminal' | 'invalid'> {
+  if (!job.message_id || !job.conversation_id) return 'invalid'
   const { data, error } = await admin
     .from('whatsapp_messages')
-    .select('status')
-    .eq('id', messageId)
+    .select('status,tenant_id,conversation_id,direction')
+    .eq('id', job.message_id)
     .maybeSingle()
   if (error) {
     throw new Error(`failed to read linked message status: ${error.message ?? 'unknown error'}`)
   }
-  const status = (data as { status?: string } | null)?.status
-  return status != null && TERMINAL_MESSAGE_STATUSES.has(status)
+  const message = data as {
+    status?: string; tenant_id?: string; conversation_id?: string; direction?: string
+  } | null
+  if (
+    !message || message.tenant_id !== job.tenant_id ||
+    message.conversation_id !== job.conversation_id || message.direction !== 'outbound'
+  ) return 'invalid'
+  return message.status != null && TERMINAL_MESSAGE_STATUSES.has(message.status)
+    ? 'terminal' : 'pending'
 }
 
 /**
@@ -178,7 +202,6 @@ async function isMessageTerminal(admin: SupabaseClient, messageId: string): Prom
  * again. Order matches the spec — the first matching reason wins.
  */
 function detectPermanentBlock(job: OutboxJob, adapter: OutboundAdapter, now: Date): string | null {
-  if (job.canal_status !== 'ativo') return 'canal_inativo'
   if (job.conversa_optout_em != null) return 'conversa_optout'
   if (job.lead_status_saida !== 'ativo') return 'lead_inativo'
   if (job.conversa_status === 'encerrada') return 'conversa_encerrada'
@@ -201,10 +224,11 @@ function detectPermanentBlock(job: OutboxJob, adapter: OutboundAdapter, now: Dat
 async function deadLetterBlock(
   admin: SupabaseClient,
   job: OutboxJob,
+  workerId: string,
   motivo: string,
   now: Date,
 ): Promise<void> {
-  await updateOutbox(admin, job.outbox_id, {
+  await updateOutbox(admin, job.outbox_id, workerId, {
     status: 'morto',
     dead_letter_at: now.toISOString(),
     last_error_code: motivo,
@@ -227,10 +251,11 @@ async function deadLetterBlock(
 async function requeue(
   admin: SupabaseClient,
   job: OutboxJob,
+  workerId: string,
   now: Date,
   delaySeconds: number,
 ): Promise<void> {
-  await updateOutbox(admin, job.outbox_id, {
+  await updateOutbox(admin, job.outbox_id, workerId, {
     status: 'pendente',
     claimed_by: null,
     claimed_at: null,
@@ -253,9 +278,77 @@ const BROADCAST_REQUEUE_DELAY_S = 300
  * but checked rarely, so it neither spins nor floods the audit trail.
  */
 const ALLOWLIST_REQUEUE_DELAY_S = 3600
+const CAMPAIGN_REQUEUE_DELAY_S = 300
+const CAMPAIGN_INVALID_REQUEUE_DELAY_S = 3600
+const PREFLIGHT_REQUEUE_DELAY_S = 300
+const CHANNEL_REQUEUE_DELAY_S = 300
 
-async function markSimulated(admin: SupabaseClient, job: OutboxJob, now: Date): Promise<void> {
-  await updateOutbox(admin, job.outbox_id, { status: 'simulado', updated_at: now.toISOString() })
+/** Recheck the channel after a claim and just before provider I/O. A pause
+ * racing with claim must preserve the queued message, not dead-letter it. */
+async function channelIsActive(admin: SupabaseClient, job: OutboxJob): Promise<boolean> {
+  const { data, error } = await admin.from('whatsapp_channels')
+    .select('status,tenant_id')
+    .eq('id', job.canal_id)
+    .maybeSingle()
+  if (error) throw new Error(`failed to read channel status: ${error.message}`)
+  if (!data || data.tenant_id !== job.tenant_id) throw new Error('channel_link_invalid')
+  return data.status === 'ativo'
+}
+
+type CampaignState = 'active' | 'paused' | 'cancelled' | 'invalid'
+
+/** The recipient relation is authoritative: an outbox payload alone cannot identify its campaign. */
+async function readCampaignState(admin: SupabaseClient, job: OutboxJob): Promise<CampaignState> {
+  const { data: recipients, error: recipientError } = await admin
+    .from('whatsapp_broadcast_recipients')
+    .select('tenant_id,broadcast_id')
+    .eq('outbox_id', job.outbox_id)
+    .limit(2)
+  if (recipientError) throw new Error(`failed to read broadcast recipient: ${recipientError.message}`)
+  if (!recipients || recipients.length !== 1 || recipients[0].tenant_id !== job.tenant_id) {
+    return 'invalid'
+  }
+
+  const { data: campaign, error: campaignError } = await admin
+    .from('whatsapp_broadcasts')
+    .select('status,tenant_id,canal_id')
+    .eq('id', recipients[0].broadcast_id)
+    .maybeSingle()
+  if (campaignError) throw new Error(`failed to read broadcast status: ${campaignError.message}`)
+  if (!campaign || campaign.tenant_id !== job.tenant_id || campaign.canal_id !== job.canal_id) {
+    return 'invalid'
+  }
+  if (campaign.status === 'cancelado') return 'cancelled'
+  if (campaign.status === 'pausado') return 'paused'
+  return campaign.status === 'aprovado' || campaign.status === 'enviando' ? 'active' : 'invalid'
+}
+
+async function guardCampaign(
+  admin: SupabaseClient,
+  flags: WhatsappFlags,
+  workerId: string,
+  job: OutboxJob,
+  now: Date,
+): Promise<{ outcome: JobOutcome; bucket: Bucket } | null> {
+  if (job.tipo !== 'broadcast') return null
+  const state = await readCampaignState(admin, job)
+  if (state === 'active') return null
+  if (state === 'cancelled') {
+    await updateOutbox(admin, job.outbox_id, workerId, { status: 'cancelado', updated_at: now.toISOString() })
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'campanha_cancelada' })
+    return {
+      outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'campanha_cancelada' },
+      bucket: 'blocked',
+    }
+  }
+  const reason = state === 'paused' ? 'campanha_pausada' : 'campanha_vinculo_invalido'
+  await requeue(admin, job, workerId, now, state === 'paused' ? CAMPAIGN_REQUEUE_DELAY_S : CAMPAIGN_INVALID_REQUEUE_DELAY_S)
+  await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
+  return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' }
+}
+
+async function markSimulated(admin: SupabaseClient, job: OutboxJob, workerId: string, now: Date): Promise<void> {
+  await updateOutbox(admin, job.outbox_id, workerId, { status: 'simulado', updated_at: now.toISOString() })
 }
 
 /** Normalizes a thrown adapter error (MetaApiError, EvolutionApiError, or a plain Error) into the shape `./outbox.ts` classifies. */
@@ -277,14 +370,24 @@ async function handleJob(
   flags: WhatsappFlags,
   workerId: string,
   job: OutboxJob,
-  now: Date,
+  clock: () => Date,
+  onProviderAttempt: () => void,
 ): Promise<{ outcome: JobOutcome; bucket: Bucket }> {
+  const now = clock()
   const adapter = getAdapter(job.provider)
+
+  // Older claims can carry a paused snapshot. Do not make that a permanent
+  // business failure: resume should send the same job once it is eligible.
+  if (job.canal_status !== 'ativo') {
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'canal_pausado' })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
+  }
 
   // a) permanent business block.
   const blockReason = detectPermanentBlock(job, adapter, now)
   if (blockReason) {
-    await deadLetterBlock(admin, job, blockReason, now)
+    await deadLetterBlock(admin, job, workerId, blockReason, now)
     await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: blockReason })
     return {
       outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: blockReason },
@@ -292,25 +395,34 @@ async function handleJob(
     }
   }
 
-  // b) the linked message already reached a terminal status — don't resend.
-  if (job.message_id && (await isMessageTerminal(admin, job.message_id))) {
-    await updateOutbox(admin, job.outbox_id, { status: 'enviado', updated_at: now.toISOString() })
-    await registrarAuditoria(admin, {
-      job,
-      flags,
-      workerId,
-      decisao: 'bloqueado',
-      motivo: 'mensagem_ja_terminal',
-    })
-    return {
-      outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'mensagem_ja_terminal' },
-      bucket: 'blocked',
+  // b) a linked message must belong to this tenant/conversation and be outbound.
+  if (job.message_id) {
+    const messageState = await readLinkedMessageState(admin, job)
+    if (messageState === 'invalid') {
+      await deadLetterBlock(admin, job, workerId, 'mensagem_vinculo_invalido', now)
+      await registrarAuditoria(admin, {
+        job, flags, workerId, decisao: 'bloqueado', motivo: 'mensagem_vinculo_invalido',
+      })
+      return {
+        outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'mensagem_vinculo_invalido' },
+        bucket: 'blocked',
+      }
+    }
+    if (messageState === 'terminal') {
+      await updateOutbox(admin, job.outbox_id, workerId, { status: 'enviado', updated_at: now.toISOString() })
+      await registrarAuditoria(admin, {
+        job, flags, workerId, decisao: 'bloqueado', motivo: 'mensagem_ja_terminal',
+      })
+      return {
+        outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'mensagem_ja_terminal' },
+        bucket: 'blocked',
+      }
     }
   }
 
   // c) broadcast kill switch — second barrier behind the claim RPC's own filter.
   if (job.tipo === 'broadcast' && flags.broadcastEnabled !== true) {
-    await requeue(admin, job, now, BROADCAST_REQUEUE_DELAY_S)
+    await requeue(admin, job, workerId, now, BROADCAST_REQUEUE_DELAY_S)
     await registrarAuditoria(admin, {
       job,
       flags,
@@ -324,6 +436,18 @@ async function handleJob(
     }
   }
 
+  // A claim may predate a pause/cancellation. Do not let already queued jobs bypass it.
+  const campaignBlock = await guardCampaign(admin, flags, workerId, job, now)
+  if (campaignBlock) return campaignBlock
+
+  // A pause can land after the database selected candidates. Check again
+  // before even simulating, so shadow runs preserve the pending job too.
+  if (!await channelIsActive(admin, job)) {
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'canal_pausado' })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
+  }
+
   // d) shadow — no provider call, no credential read, whatsapp_messages untouched.
   //
   // Checked BEFORE the pilot allowlist on purpose. The allowlist exists to
@@ -335,7 +459,7 @@ async function handleJob(
   // allowlist decision without a real send.
   if (flags.mode !== 'live' || !isSendEnabledFor(job.provider, flags)) {
     const motivo = flags.mode !== 'live' ? 'modo_shadow' : 'provider_send_desabilitado'
-    await markSimulated(admin, job, now)
+    await markSimulated(admin, job, workerId, now)
     await registrarAuditoria(admin, {
       job,
       flags,
@@ -350,7 +474,7 @@ async function handleJob(
   // e) pilot allowlist — live only, and temporary, so requeue rather than
   //    dead-letter: the number may be allowlisted later, or the pilot ends.
   if (!isAllowlisted(job.lead_whatsapp, flags)) {
-    await requeue(admin, job, now, ALLOWLIST_REQUEUE_DELAY_S)
+    await requeue(admin, job, workerId, now, ALLOWLIST_REQUEUE_DELAY_S)
     await registrarAuditoria(admin, {
       job,
       flags,
@@ -370,11 +494,10 @@ async function handleJob(
     credential = await loadChannelCredential(admin, job.canal_id, job.provider)
   } catch (err) {
     // Only a genuinely absent credential is permanent. A read failure is
-    // transient: rethrow so the per-job handler leaves the row 'processando'
-    // for lease recovery instead of dead-lettering a valid message.
+    // transient: rethrow so the outer handler can requeue before provider contact.
     if (!(err instanceof ChannelCredentialMissingError)) throw err
     console.error('[whatsapp-outbox-worker] channel has no stored credential', job.canal_id)
-    await deadLetterBlock(admin, job, 'credencial_ausente', now)
+    await deadLetterBlock(admin, job, workerId, 'credencial_ausente', now)
     await registrarAuditoria(admin, {
       job,
       flags,
@@ -388,59 +511,81 @@ async function handleJob(
     }
   }
 
+  // A pause can be committed while the credential is loading. Narrow that race
+  // by reading the campaign again immediately before the provider call.
+  const lastCampaignBlock = await guardCampaign(admin, flags, workerId, job, now)
+  if (lastCampaignBlock) return lastCampaignBlock
+
+  if (!await channelIsActive(admin, job)) {
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'canal_pausado' })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
+  }
+
+  let providerMessageId: string
   try {
+    // From this point onward an exception may hide an accepted provider send.
+    // Never automatically requeue this job based on the exception alone.
+    onProviderAttempt()
     const result = await adapter.send({ job, credential })
-    // A MENSAGEM grava antes da FILA, de propósito: se o processo cair entre
-    // as duas escritas, o job fica 'processando', o lease expira, o re-claim
-    // encontra a mensagem já terminal e a barreira (b) marca o outbox como
-    // 'enviado' SEM reenviar ao cliente. Na ordem inversa (fila primeiro), o
-    // crash deixava outbox='enviado' com a mensagem presa em 'pendente' —
-    // estado que nenhuma barreira cobre e que um reenfileiramento manual
-    // transformaria em mensagem duplicada para uma pessoa real.
-    if (job.message_id) {
-      await updateMessage(admin, job.message_id, {
-        status: 'enviada',
-        wamid: result.providerMessageId,
-      })
-    }
-    await applyOutboxSuccess(admin, { id: job.outbox_id }, now)
-    await registrarAuditoria(admin, {
-      job,
-      flags,
-      workerId,
-      decisao: 'enviado',
-      detalhe: { tipo: job.tipo, provider_message_id: result.providerMessageId },
-    })
-    return { outcome: { outboxId: job.outbox_id, decision: 'enviado' }, bucket: 'sent' }
+    providerMessageId = result.providerMessageId
   } catch (err) {
     const errInfo = extractErrorInfo(err)
+    const failedAt = clock()
     const failureOutcome = await applyOutboxFailure(
       admin,
       { id: job.outbox_id, attempts: job.attempts, max_attempts: job.max_attempts },
       errInfo,
-      now,
+      failedAt,
+      workerId,
     )
-    if (failureOutcome.deadLettered && job.message_id) {
-      await updateMessage(admin, job.message_id, {
+    // An uncertain result might actually have been accepted. Do not label the
+    // linked message "failed" or offer a blind resend before reconciliation.
+    if (failureOutcome.deadLettered && failureOutcome.errorClass !== 'uncertain' && job.message_id) {
+      await updateMessage(admin, job, {
         status: 'falhou',
         erro_code: errInfo.code !== undefined ? String(errInfo.code) : 'erro_desconhecido',
         erro_detalhe: errInfo.message ?? null,
       })
     }
     const decisao: Decisao = failureOutcome.deadLettered ? 'falha_permanente' : 'falha_retryable'
+    const motivo = failureOutcome.errorClass === 'uncertain' ? 'resultado_incerto' : errInfo.message
     await registrarAuditoria(admin, {
       job,
       flags,
       workerId,
       decisao,
-      motivo: errInfo.message,
+      motivo,
       detalhe: { tipo: job.tipo },
     })
     return {
-      outcome: { outboxId: job.outbox_id, decision: decisao, reason: errInfo.message },
+      outcome: { outboxId: job.outbox_id, decision: decisao, reason: motivo },
       bucket: failureOutcome.deadLettered ? 'deadLettered' : 'retried',
     }
   }
+
+  // Persistence is deliberately outside the provider catch. A database
+  // failure after a 2xx must leave this claimed job for manual reconciliation,
+  // never turn it into a retryable provider failure.
+  const completedAt = clock()
+  // Store provider evidence in the linked message before closing the queue.
+  // If the process crashes between writes, the queue remains `processando`
+  // and requires reconciliation; it must not be reclaimed blindly.
+  if (job.message_id) {
+    await updateMessage(admin, job, {
+      status: 'enviada',
+      wamid: providerMessageId,
+    })
+  }
+  await applyOutboxSuccess(admin, { id: job.outbox_id }, completedAt, workerId)
+  await registrarAuditoria(admin, {
+    job,
+    flags,
+    workerId,
+    decisao: 'enviado',
+    detalhe: { tipo: job.tipo, provider_message_id: providerMessageId },
+  })
+  return { outcome: { outboxId: job.outbox_id, decision: 'enviado' }, bucket: 'sent' }
 }
 
 /**
@@ -450,12 +595,18 @@ async function handleJob(
  * for a bug in a queue update that should surface loudly.
  */
 export async function processOutboxBatch(opts: ProcessOutboxBatchOpts): Promise<ProcessOutboxResult> {
-  const { admin, flags, workerId, limit = 10, leaseSeconds = 120, now = new Date() } = opts
+  const { admin, flags, workerId, limit = 10, leaseSeconds = 120 } = opts
+  const clock = opts.now ? () => opts.now! : () => new Date()
+  // Until the claim/finalization contract is fully fenced in the database,
+  // send one live job per invocation. A longer lease covers provider timeout
+  // and database bookkeeping; it is not an exactly-once guarantee.
+  const claimLimit = flags.mode === 'live' ? 1 : limit
+  const effectiveLeaseSeconds = flags.mode === 'live' ? Math.max(leaseSeconds, 120) : leaseSeconds
 
   const { data, error } = await admin.rpc('whatsapp_oficial_outbox_claim', {
     p_worker_id: workerId,
-    p_limit: limit,
-    p_lease_seconds: leaseSeconds,
+    p_limit: claimLimit,
+    p_lease_seconds: effectiveLeaseSeconds,
   })
   if (error) throw error
 
@@ -469,17 +620,35 @@ export async function processOutboxBatch(opts: ProcessOutboxBatchOpts): Promise<
   result.claimed = jobs.length
 
   for (const job of jobs) {
+    let providerAttemptStarted = false
     try {
-      const { outcome, bucket } = await handleJob(admin, flags, workerId, job, now)
+      const { outcome, bucket } = await handleJob(admin, flags, workerId, job, clock, () => {
+        providerAttemptStarted = true
+      })
       result[bucket] += 1
       result.outcomes.push(outcome)
     } catch (err) {
       // A single job's unexpected exception must never derail the batch.
       console.error('[whatsapp-outbox-worker] unexpected error processing job', job.outbox_id, err)
+      if (!providerAttemptStarted) {
+        try {
+          await requeue(admin, job, workerId, clock(), PREFLIGHT_REQUEUE_DELAY_S)
+          await registrarAuditoria(admin, {
+            job, flags, workerId, decisao: 'reenfileirado', motivo: 'falha_pre_envio',
+          })
+          result.retried += 1
+          result.outcomes.push({ outboxId: job.outbox_id, decision: 'reenfileirado', reason: 'falha_pre_envio' })
+          continue
+        } catch (requeueError) {
+          // A failed fenced update cannot prove who owns this row now. Leave
+          // it claimed for explicit reconciliation; never send it again here.
+          console.error('[whatsapp-outbox-worker] failed to requeue pre-send job', job.outbox_id, requeueError)
+        }
+      }
       result.outcomes.push({
         outboxId: job.outbox_id,
         decision: 'erro_inesperado',
-        reason: err instanceof Error ? err.message : String(err),
+        reason: 'reconciliacao_necessaria',
       })
     }
   }

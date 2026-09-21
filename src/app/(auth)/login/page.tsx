@@ -3,8 +3,8 @@
 import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { useTranslations } from "next-intl";
 import { createClient } from "@/lib/supabase/client";
+import { callbackErrorMessage, loginErrorMessage } from "@/lib/auth/login-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -37,11 +37,9 @@ function LoginPageInner() {
   // account. After a successful sign-in we send them to the join
   // page to accept rather than to /dashboard.
   const inviteToken = searchParams.get("invite");
-  const t = useTranslations("LoginPage");
-
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => callbackErrorMessage(searchParams.get("erro")));
   const [loading, setLoading] = useState(false);
   const supabase = createClient();
 
@@ -56,7 +54,7 @@ function LoginPageInner() {
     });
 
     if (error) {
-      setError(error.message);
+      setError(loginErrorMessage(error.code));
       setLoading(false);
       return;
     }
@@ -87,12 +85,12 @@ function LoginPageInner() {
             )}
           </div>
           <CardTitle className="text-xl text-foreground">
-            {inviteToken ? t('titleAccept') : t('titleWelcome')}
+            {inviteToken ? "Entrar para aceitar o convite" : "Entre no WhatsHub"}
           </CardTitle>
           <CardDescription className="text-muted-foreground">
             {inviteToken
-              ? t('descAccept')
-              : t('descWelcome')}
+              ? "Use sua conta SUNT para aceitar o convite da equipe."
+              : "Atendimento e campanhas da SUNT em um só lugar."}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -105,12 +103,13 @@ function LoginPageInner() {
 
             <div className="flex flex-col gap-2">
               <Label htmlFor="email" className="text-muted-foreground">
-                {t('emailLabel')}
+                E-mail
               </Label>
               <Input
                 id="email"
                 type="email"
-                placeholder={t('emailPlaceholder')}
+                placeholder="seu@email.com"
+                autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
@@ -121,19 +120,20 @@ function LoginPageInner() {
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="password" className="text-muted-foreground">
-                  {t('passwordLabel')}
+                  Senha
                 </Label>
                 <Link
                   href="/forgot-password"
                   className="text-sm text-primary hover:text-primary/80"
                 >
-                  {t('forgotPassword')}
+                  Esqueci minha senha
                 </Link>
               </div>
               <Input
                 id="password"
                 type="password"
-                placeholder={t('passwordPlaceholder')}
+                placeholder="Sua senha"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
@@ -146,7 +146,7 @@ function LoginPageInner() {
               disabled={loading}
               className="mt-2 h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
-              {loading ? t('signingIn') : t('signIn')}
+              {loading ? "Entrando..." : "Entrar"}
             </Button>
           </form>
 

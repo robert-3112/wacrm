@@ -45,6 +45,7 @@ class FakeQuery implements PromiseLike<{ data: Linha[] | null; error: { message:
   private linhas: Linha[]
   private limite: number | null = null
   private readonly inner: boolean
+  private embeddedConversationTenant: string | null = null
 
   constructor(
     private readonly tabela: string,
@@ -56,6 +57,10 @@ class FakeQuery implements PromiseLike<{ data: Linha[] | null; error: { message:
 
   eq(coluna: string, valor: unknown) {
     eqPedidos.push({ tabela: this.tabela, coluna, valor })
+    if (coluna === 'whatsapp_conversations.tenant_id') {
+      this.embeddedConversationTenant = String(valor)
+      return this
+    }
     if (coluna.includes('.')) {
       // Filtro de RECURSO EMBEDADO (`lead.tenant_id`). O fake registra e NÃO aplica, de
       // propósito: se emulasse, o teste de vazamento entre tenants passaria por causa do fake e
@@ -105,7 +110,8 @@ class FakeQuery implements PromiseLike<{ data: Linha[] | null; error: { message:
     if (this.tabela === 'leads' && this.inner) {
       // `!inner` = descarta lead sem conversa.
       out = out.filter((l) =>
-        db.whatsapp_conversations.some((c) => c.lead_id === l.id),
+        db.whatsapp_conversations.some((c) =>
+          c.lead_id === l.id && c.tenant_id === this.embeddedConversationTenant),
       )
     }
     return this.limite === null ? out : out.slice(0, this.limite)
@@ -130,9 +136,13 @@ vi.mock('@/lib/whatsapp-oficial/supabase-admin', () => ({
 
 import { GET as getHealth } from './health/route'
 import { GET as getConversations } from './conversations/route'
+import { GET as getConversation } from './conversations/[id]/route'
 import { GET as getMessages } from './conversations/[id]/messages/route'
+import { GET as getMessage } from './messages/[id]/route'
 import { POST as postMessage } from './messages/route'
+import { POST as postSophiaClaim } from './sophia/claims/route'
 import { GET as getContacts } from './contacts/route'
+import { GET as getContact } from './contacts/[id]/route'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chaves e semeadura
@@ -160,6 +170,7 @@ function registraChave(
 }
 
 /** Substitui a RPC de autenticação pelo comportamento real dela (provado no PGlite). */
+const idempotentMessages = new Map<string, { conversationId: string; content: string; message: Record<string, unknown> }>()
 function autenticacaoPadrao() {
   rpc.mockImplementation(async (nome: string, args: Record<string, unknown>) => {
     if (nome === 'whatsapp_oficial_autenticar_api_key') {
@@ -175,7 +186,8 @@ function autenticacaoPadrao() {
         error: null,
       }
     }
-    if (nome === 'whatsapp_oficial_enfileirar_mensagem_api') {
+    if (nome === 'whatsapp_oficial_enfileirar_mensagem_api' ||
+        nome === 'whatsapp_oficial_enfileirar_mensagem_api_idempotente') {
       const dona = Object.values(chaves).find((k) => k.apiKeyId === args.p_api_key_id)
       const conversa = db.whatsapp_conversations.find((c) => c.id === args.p_conversation_id)
       // Espelha a checagem que a RPC faz: conversa de outro tenant é indistinguível de
@@ -186,18 +198,32 @@ function autenticacaoPadrao() {
       if (conversa.optout_em) {
         return { data: { ok: false, reason: 'lead_optout_ou_inativo' }, error: null }
       }
+      const idemKey = nome.endsWith('_idempotente')
+        ? `${dona.tenant}:${dona.apiKeyId}:${args.p_idempotency_key}` : null
+      const previous = idemKey ? idempotentMessages.get(idemKey) : null
+      if (previous) {
+        if (previous.conversationId !== conversa.id || previous.content !== args.p_content) {
+          return { data: { ok: false, reason: 'idempotency_conflict' }, error: null }
+        }
+        return { data: { ok: true, message: previous.message, replayed: true }, error: null }
+      }
+      const message = {
+        id: 'msg-nova',
+        conversation_id: conversa.id,
+        direction: 'outbound',
+        message_type: 'text',
+        content: args.p_content,
+        status: 'pendente',
+        created_at: '2026-07-26T12:00:00.000Z',
+      }
+      if (idemKey) idempotentMessages.set(idemKey, {
+        conversationId: conversa.id, content: String(args.p_content), message,
+      })
       return {
         data: {
           ok: true,
-          message: {
-            id: 'msg-nova',
-            conversation_id: conversa.id,
-            direction: 'outbound',
-            message_type: 'text',
-            content: args.p_content,
-            status: 'pendente',
-            created_at: '2026-07-26T12:00:00.000Z',
-          },
+          message,
+          ...(idemKey ? { replayed: false } : {}),
         },
         error: null,
       }
@@ -284,6 +310,7 @@ function semeia() {
 
 beforeEach(() => {
   rpc.mockReset()
+  idempotentMessages.clear()
   __resetRateLimitForTests()
   eqPedidos.length = 0
   for (const k of Object.keys(chaves)) delete chaves[k]
@@ -301,8 +328,11 @@ describe('401 — todas as rotas, todos os casos, o mesmo corpo', () => {
   const rotas: Array<[string, (r: Request) => Promise<Response>]> = [
     ['health', (r) => getHealth(r)],
     ['conversations', (r) => getConversations(r)],
+    ['conversations/{id}', (r) => getConversation(r, { params: Promise.resolve({ id: uuid(10) }) })],
     ['contacts', (r) => getContacts(r)],
+    ['contacts/{id}', (r) => getContact(r, { params: Promise.resolve({ id: uuid(1) }) })],
     ['messages (POST)', (r) => postMessage(r)],
+    ['messages/{id}', (r) => getMessage(r, { params: Promise.resolve({ id: uuid(100) }) })],
     [
       'conversations/{id}/messages',
       (r) => getMessages(r, { params: Promise.resolve({ id: uuid(10) }) }),
@@ -360,6 +390,15 @@ describe('403 — escopo ausente', () => {
     })
   })
 
+  it('conversations/{id} exige conversations:read', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['messages:read'])
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(403)
+    expect(await corpo(res)).toMatchObject({ required: 'conversations:read' })
+  })
+
   it('POST /messages exige messages:send', async () => {
     registraChave(CHAVE_A, 'key-a', 'sunt', ['messages:read', 'conversations:read'])
     const res = await postMessage(
@@ -384,6 +423,15 @@ describe('403 — escopo ausente', () => {
     expect(await corpo(res)).toMatchObject({ required: 'contacts:read' })
   })
 
+  it('messages/{id} exige messages:read', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['conversations:read'])
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(100) }),
+    })
+    expect(res.status).toBe(403)
+    expect(await corpo(res)).toMatchObject({ required: 'messages:read' })
+  })
+
   it('health nao exige escopo: chave sem escopo nenhum passa', async () => {
     registraChave(CHAVE_A, 'key-a', 'sunt', [])
     const res = await getHealth(req('/api/v1/health', CHAVE_A))
@@ -392,11 +440,153 @@ describe('403 — escopo ausente', () => {
   })
 })
 
+describe('POST /api/v1/sophia/claims', () => {
+  const claimRequest = (messageId: string, key = CHAVE_A) =>
+    req('/api/v1/sophia/claims', key, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: messageId }),
+    })
+
+  it('exige escopo exclusivo antes de tentar o claim', async () => {
+    const res = await postSophiaClaim(claimRequest(uuid(100)))
+    expect(res.status).toBe(403)
+    expect(await corpo(res)).toMatchObject({ required: 'sophia:process' })
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_sophia_claim_inbound', expect.anything())
+  })
+
+  it('aceita um claim e impede nova execução no redelivery', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['sophia:process'])
+    const old = rpc.getMockImplementation()!
+    let claimed = false
+    rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name !== 'whatsapp_sophia_claim_inbound') return old(name, args)
+      expect(args).toEqual({ p_message_id: uuid(100), p_api_key_id: 'key-a' })
+      if (claimed) return { data: { ok: false, reason: 'already_claimed' }, error: null }
+      claimed = true
+      return { data: { ok: true, claim_id: uuid(300), claim_token: `sc_${'a'.repeat(64)}` }, error: null }
+    })
+    const first = await postSophiaClaim(claimRequest(uuid(100)))
+    expect(first.status).toBe(201)
+    expect(first.headers.get('cache-control')).toBe('no-store')
+    expect(await corpo(first)).toEqual({ data: { claim_id: uuid(300), claim_token: `sc_${'a'.repeat(64)}` } })
+    const second = await postSophiaClaim(claimRequest(uuid(100)))
+    expect(second.status).toBe(409)
+    expect(await corpo(second)).toMatchObject({ error: 'already_claimed' })
+  })
+
+  it('não consulta o claim com UUID inválido e esconde outro tenant como 404', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['sophia:process'])
+    const invalid = await postSophiaClaim(claimRequest('not-a-uuid'))
+    expect(invalid.status).toBe(400)
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_sophia_claim_inbound', expect.anything())
+    const old = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (name: string, args: Record<string, unknown>) =>
+      name === 'whatsapp_sophia_claim_inbound'
+        ? { data: { ok: false, reason: 'mensagem_nao_encontrada' }, error: null }
+        : old(name, args))
+    const hidden = await postSophiaClaim(claimRequest(uuid(101, '2')))
+    expect(hidden.status).toBe(404)
+  })
+
+  it('recusa um corpo acima de 512 bytes sem chamar a RPC de claim', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['sophia:process'])
+    const res = await postSophiaClaim(req('/api/v1/sophia/claims', CHAVE_A, {
+      method: 'POST', body: JSON.stringify({ message_id: uuid(100), padding: 'x'.repeat(600) }),
+    }))
+    expect(res.status).toBe(400)
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_sophia_claim_inbound', expect.anything())
+  })
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // O teste que mais importa
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('ISOLAMENTO ENTRE TENANTS', () => {
+  it('messages/{id}: mensagem do vizinho e id inexistente tem o mesmo 404', async () => {
+    const doVizinho = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(101, '2') }),
+    })
+    const inexistente = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(999) }),
+    })
+    expect(doVizinho.status).toBe(404)
+    expect(inexistente.status).toBe(404)
+    expect(await corpo(doVizinho)).toEqual(await corpo(inexistente))
+  })
+
+  it('messages/{id}: so devolve mensagem do tenant e conversa correspondentes', async () => {
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(100) }),
+    })
+    expect(res.status).toBe(200)
+    expect((await corpo(res)).data).toMatchObject({
+      id: uuid(100),
+      conversation_id: uuid(10),
+      content: 'mensagem do tenant A',
+    })
+    expect(res.headers.get('cache-control')).toBe('private, no-store')
+    expect(eqPedidos).toContainEqual({ tabela: 'whatsapp_messages', coluna: 'tenant_id', valor: 'sunt' })
+    expect(eqPedidos).toContainEqual({ tabela: 'whatsapp_conversations', coluna: 'tenant_id', valor: 'sunt' })
+  })
+
+  it('messages/{id}: falha fechado se a mensagem aponta para conversa de outro tenant', async () => {
+    db.whatsapp_messages.push({
+      id: uuid(103),
+      created_at: '2026-07-13T00:00:00.000Z',
+      tenant_id: 'sunt',
+      conversation_id: uuid(11, '2'),
+      content: 'NAO EXPOR',
+    })
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(103) }),
+    })
+    expect(res.status).toBe(404)
+    expect(JSON.stringify(await corpo(res))).not.toContain('NAO EXPOR')
+  })
+
+  it('messages/{id}: id malformado devolve 400 sem consultar mensagens', async () => {
+    const res = await getMessage(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: 'nao-e-uuid' }),
+    })
+    expect(res.status).toBe(400)
+    expect(eqPedidos).toEqual([])
+  })
+
+  it('conversations/{id}: conversa de outro tenant e id inexistente tem o mesmo 404', async () => {
+    const doVizinho = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(11, '2') }),
+    })
+    const inexistente = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(999) }),
+    })
+
+    expect(doVizinho.status).toBe(404)
+    expect(inexistente.status).toBe(404)
+    expect(await corpo(doVizinho)).toEqual(await corpo(inexistente))
+  })
+
+  it('conversations/{id}: devolve apenas a conversa solicitada do tenant', async () => {
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(200)
+    const body = await corpo(res)
+    expect(body.data).toMatchObject({ id: uuid(10), contact: { nome: 'Ana' } })
+    expect(JSON.stringify(body)).not.toContain('SEGREDO DO VIZINHO')
+    expect(eqPedidos).toContainEqual({ tabela: 'whatsapp_conversations', coluna: 'id', valor: uuid(10) })
+    expect(res.headers.get('cache-control')).toBe('private, no-store')
+  })
+
+  it('conversations/{id}: rejeita id malformado antes da consulta de dados', async () => {
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: 'nao-e-uuid' }),
+    })
+    expect(res.status).toBe(400)
+    expect(await corpo(res)).toMatchObject({ error: 'bad_request' })
+    expect(eqPedidos).toEqual([])
+  })
+
   it('conversations: a chave de A nao lista a conversa de B', async () => {
     const res = await getConversations(req('/api/v1/conversations', CHAVE_A))
     expect(res.status).toBe(200)
@@ -517,6 +707,28 @@ describe('ISOLAMENTO ENTRE TENANTS', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('conversations — o escopo gateia o que sai no corpo', () => {
+  it('conversations/{id}: omite preview e telefone sem os escopos correspondentes', async () => {
+    registraChave(CHAVE_A, 'key-a', 'sunt', ['conversations:read'])
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await corpo(res)).data as Record<string, unknown>
+    expect(body).not.toHaveProperty('last_message_preview')
+    expect(body.contact).toEqual({ id: uuid(1), nome: 'Ana' })
+    expect(JSON.stringify(body)).not.toContain('5511900000001')
+  })
+
+  it('conversations/{id}: libera preview e telefone com ambos os escopos', async () => {
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(10) }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await corpo(res)).data as Record<string, unknown>
+    expect(body.last_message_preview).toBe('oi')
+    expect(body.contact).toEqual({ id: uuid(1), nome: 'Ana', whatsapp: '5511900000001' })
+  })
+
   /** Lê a única conversa do tenant A com a chave A configurada com `escopos`. */
   async function conversaCom(escopos: string[]) {
     registraChave(CHAVE_A, 'key-a', 'sunt', escopos)
@@ -606,6 +818,28 @@ describe('conversations — tenant do lead embedado', () => {
     })
   })
 
+  it('conversations/{id}: nao vaza lead apontado de outro tenant', async () => {
+    semeiaLeadCruzado()
+    const erros = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await getConversation(req('/api/v1/x', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(13) }),
+    })
+    const body = await corpo(res)
+
+    expect(res.status).toBe(200)
+    expect(body.data).toMatchObject({ id: uuid(13), contact: null, lead_id: null })
+    expect(JSON.stringify(body)).not.toContain(uuid(1, '2'))
+    expect(JSON.stringify(body)).not.toContain('SEGREDO DO VIZINHO')
+    expect(JSON.stringify(body)).not.toContain('5511911111111')
+    expect(eqPedidos).toContainEqual({
+      tabela: 'whatsapp_conversations',
+      coluna: 'lead.tenant_id',
+      valor: 'sunt',
+    })
+    erros.mockRestore()
+  })
+
   it('conversa de A apontando para lead de B nao vaza nome nem telefone', async () => {
     semeiaLeadCruzado()
     const erros = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -616,14 +850,17 @@ describe('conversations — tenant do lead embedado', () => {
 
     expect(texto).not.toContain('SEGREDO DO VIZINHO')
     expect(texto).not.toContain('5511911111111')
+    expect(texto).not.toContain(uuid(1, '2'))
 
     const linhas = body.data as Array<Record<string, unknown>>
     const cruzada = linhas.find((l) => l.id === uuid(13))
     // A CONVERSA é do tenant A e continua listada — quem some é só o contato divergente.
     expect(cruzada).toBeDefined()
     expect(cruzada?.contact).toBeNull()
+    expect(cruzada?.lead_id).toBeNull()
     // E a conversa sadia do mesmo tenant não foi junto no laço.
     expect(linhas.find((l) => l.id === uuid(10))?.contact).toMatchObject({ nome: 'Ana' })
+    expect(linhas.find((l) => l.id === uuid(10))?.lead_id).toBe(uuid(1))
 
     // Divergência é problema de integridade: registra, mas sem PII no log.
     expect(erros).toHaveBeenCalled()
@@ -663,6 +900,7 @@ describe('conversations — tenant do lead embedado', () => {
     const semTenant = linhas.find((l) => l.id === uuid(14))
     expect(semTenant).toBeDefined()
     expect(semTenant?.contact).toBeNull()
+    expect(semTenant?.lead_id).toBeNull()
   })
 })
 
@@ -676,6 +914,31 @@ describe('contacts', () => {
     const linhas = (await corpo(res)).data as Array<Record<string, unknown>>
     // O lead "Sem Conversa" existe no tenant, mas não é contato do canal.
     expect(linhas.map((l) => l.nome)).not.toContain('Sem Conversa')
+  })
+
+  it('leitura pontual exige lead e conversa do mesmo tenant', async () => {
+    const own = await getContact(req('/api/v1/contacts/id', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(1) }),
+    })
+    expect(own.status).toBe(200)
+    expect((await corpo(own)).data).toMatchObject({ id: uuid(1), nome: 'Ana' })
+
+    const foreign = await getContact(req('/api/v1/contacts/id', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(1, '2') }),
+    })
+    expect(foreign.status).toBe(404)
+
+    db.leads.push({ id: uuid(5), created_at: '2026-07-13T00:00:00.000Z', tenant_id: 'sunt', nome: 'Só CRM' })
+    db.whatsapp_conversations.push({
+      id: uuid(16, '2'), created_at: '2026-07-13T00:00:00.000Z',
+      tenant_id: 'outra-imobiliaria', lead_id: uuid(5),
+    })
+    const unlinked = await getContact(req('/api/v1/contacts/id', CHAVE_A), {
+      params: Promise.resolve({ id: uuid(5) }),
+    })
+    expect(unlinked.status).toBe(404)
+    const list = await getContacts(req('/api/v1/contacts', CHAVE_A))
+    expect(JSON.stringify(await corpo(list))).not.toContain('Só CRM')
   })
 })
 
@@ -800,11 +1063,42 @@ describe('paginacao por cursor', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('POST /api/v1/messages', () => {
-  function envia(body: unknown, chave = CHAVE_A) {
+  function envia(body: unknown, chave = CHAVE_A, idempotencyKey?: string) {
     return postMessage(
-      req('/api/v1/messages', chave, { method: 'POST', body: JSON.stringify(body) }),
+      req('/api/v1/messages', chave, {
+        method: 'POST', body: JSON.stringify(body),
+        headers: idempotencyKey === undefined ? undefined : { 'Idempotency-Key': idempotencyKey },
+      }),
     )
   }
+
+  it('deduplicates an inbound event key and distinguishes a replay from a new enqueue', async () => {
+    const body = { conversationId: uuid(10), content: 'Resposta Sophia' }
+    const first = await envia(body, CHAVE_A, uuid(100))
+    const replay = await envia(body, CHAVE_A, uuid(100))
+
+    expect(first.status).toBe(201)
+    expect((await corpo(first)).data).toMatchObject({ enfileirado: true, replayed: false })
+    expect(replay.status).toBe(200)
+    expect((await corpo(replay)).data).toMatchObject({ enfileirado: true, replayed: true })
+    expect(rpc).toHaveBeenCalledWith('whatsapp_oficial_enfileirar_mensagem_api_idempotente', {
+      p_conversation_id: uuid(10), p_content: 'Resposta Sophia', p_api_key_id: 'key-a',
+      p_idempotency_key: uuid(100),
+    })
+  })
+
+  it('returns 409 if one idempotency key is reused with different content', async () => {
+    await envia({ conversationId: uuid(10), content: 'primeira' }, CHAVE_A, uuid(100))
+    const res = await envia({ conversationId: uuid(10), content: 'outra' }, CHAVE_A, uuid(100))
+    expect(res.status).toBe(409)
+    expect((await corpo(res)).error).toBe('idempotency_conflict')
+  })
+
+  it.each(['', 'x'.repeat(256)])('rejects an invalid idempotency key before enqueue', async (key) => {
+    const res = await envia({ conversationId: uuid(10), content: 'oi' }, CHAVE_A, key)
+    expect(res.status).toBe(400)
+    expect(rpc).not.toHaveBeenCalledWith('whatsapp_oficial_enfileirar_mensagem_api_idempotente', expect.anything())
+  })
 
   it('responde enfileirado:true e NUNCA a palavra "enviado"', async () => {
     const res = await envia({ conversationId: uuid(10), content: 'Bom dia!' })
