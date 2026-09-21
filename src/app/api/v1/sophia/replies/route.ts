@@ -46,6 +46,7 @@ export async function POST(request: Request): Promise<Response> {
       message_id?: string
       conversation_id?: string
       status?: string
+      idempotent_replay?: boolean
     }
     if (result?.ok !== true) {
       const reason = result?.reason ?? 'sophia_reply_rejected'
@@ -55,12 +56,15 @@ export async function POST(request: Request): Promise<Response> {
       ])
       throw new ApiV1Error(reason, conflict.has(reason) ? 409 : 422)
     }
+    // Same-content retry of an already queued reply: same message_id, nothing new queued.
+    const replay = result.idempotent_replay === true
     return apiV1Ok({
       enfileirado: true,
       message_id: result.message_id,
       conversation_id: result.conversation_id,
       status: result.status,
-    }, 201)
+      idempotent_replay: replay,
+    }, replay ? 200 : 201)
   } catch (error) {
     return toApiV1Response(error)
   }

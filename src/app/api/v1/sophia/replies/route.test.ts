@@ -74,13 +74,28 @@ describe('POST /api/v1/sophia/replies', () => {
     const response = await POST(request({ claimId: CLAIM_ID, claimToken: TOKEN, content: 'Olá' }))
     expect(response.status).toBe(201)
     expect(await response.json()).toEqual({
-      data: { enfileirado: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'pendente' },
+      data: { enfileirado: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'pendente',
+        idempotent_replay: false },
     })
     expect(rpc).toHaveBeenCalledWith('whatsapp_sophia_enfileirar_resposta', {
       p_claim_id: CLAIM_ID,
       p_claim_token: TOKEN,
       p_api_key_id: 'key-1',
       p_content: 'Olá',
+    })
+  })
+
+  it('returns the original message on a same-content retry (200, idempotent_replay)', async () => {
+    rpc.mockResolvedValue({
+      data: { ok: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'enviado',
+        idempotent_replay: true },
+      error: null,
+    })
+    const response = await POST(request({ claimId: CLAIM_ID, claimToken: TOKEN, content: 'Olá' }))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      data: { enfileirado: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'enviado',
+        idempotent_replay: true },
     })
   })
 })
