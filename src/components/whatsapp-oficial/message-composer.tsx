@@ -29,11 +29,9 @@ interface MessageComposerProps {
    * `travas.envioMetaLigado` — já combina `WHATSAPP_OUTBOUND_MODE` com a trava
    * do provider.
    *
-   * OBRIGATORIO de proposito, e sem valor padrao: com o envio real desligado a
-   * mensagem e gravada, enfileirada e marcada como `simulado` pelo worker — e a
-   * tela mostrava a bolha roxa igualzinha a uma mensagem entregue, com um
-   * reloginho que nunca resolve. O operador conclui que falou com o cliente e
-   * nao falou. Foi o que aconteceu no primeiro uso real.
+   * Obrigatório e sem valor padrão: informa o processamento local. A fila pode
+   * ser compartilhada com outro ambiente que realiza envios reais; enfileirar
+   * não comprova entrega nem garante simulação.
    *
    * Se alguem acrescentar outro ponto de envio, o TypeScript obriga a decidir o
    * que dizer ao operador em vez de herdar um default otimista.
@@ -220,8 +218,8 @@ export function MessageComposer({
       </div>
       {!envioReal && (
         <p className="mt-2 rounded-md bg-amber-500/10 px-2 py-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-          Envio real DESLIGADO — o que você mandar aqui fica registrado na
-          conversa, mas <strong>não chega ao cliente</strong>.
+          Envio real desativado neste ambiente. A fila compartilhada pode gerar{" "}
+          <strong>envio real por outro ambiente</strong>.
         </p>
       )}
       {mediaAvailable && envioReal && (
