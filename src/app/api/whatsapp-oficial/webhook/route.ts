@@ -294,16 +294,14 @@ export async function processWebhookBody(
 }
 
 /**
- * Resolve o canal pelo WABA id que vem em `entry.id` — eventos de template
- * não trazem `phone_number_id`. Devolve null (em vez de lançar) quando não há
- * exatamente um canal: sem canal não dá nem para registrar em
- * `whatsapp_webhook_events` (canal_id é NOT NULL), e forçar redelivery de um
- * evento que nunca vai resolver só empilharia retry na Meta.
+ * Templates pertencem ao WABA. Todos os números daquele WABA, dentro do mesmo
+ * tenant, precisam receber o evento; cada canal mantém seu catálogo próprio.
+ * WABA compartilhado entre tenants é configuração ambígua e fica bloqueado.
  */
-async function findChannelByWabaId(
+async function findChannelsByWabaId(
   wabaId: string,
   admin: SupabaseClient,
-): Promise<ChannelRow | null> {
+): Promise<ChannelRow[]> {
   const { data, error } = await admin
     .from('whatsapp_channels')
     .select('id, tenant_id, status')
@@ -315,16 +313,16 @@ async function findChannelByWabaId(
   const rows = (data ?? []) as ChannelRow[]
   if (rows.length === 0) {
     console.error('[whatsapp-oficial/webhook] no channel configured for waba_id:', wabaId)
-    return null
+    return []
   }
-  if (rows.length > 1) {
+  if (new Set(rows.map((row) => row.tenant_id)).size !== 1) {
     console.error(
-      `[whatsapp-oficial/webhook] ${rows.length} channels matched waba_id ${wabaId}; ` +
-        'skipping the template event to avoid ambiguous tenancy.',
+      `[whatsapp-oficial/webhook] waba_id ${wabaId} belongs to multiple tenants; ` +
+        'skipping the template event to avoid cross-tenant propagation.',
     )
-    return null
+    return []
   }
-  return rows[0]
+  return rows
 }
 
 /**
@@ -354,8 +352,20 @@ async function processTemplateLifecycleChange(
     console.error(`[whatsapp-oficial/webhook] ${field} without entry.id (waba id), skipped.`)
     return
   }
-  const channel = await findChannelByWabaId(wabaId, admin)
-  if (!channel) return
+  const channels = await findChannelsByWabaId(wabaId, admin)
+  for (const channel of channels) {
+    await processTemplateLifecycleForChannel(entry, field, value, admin, channel, nome)
+  }
+}
+
+async function processTemplateLifecycleForChannel(
+  entry: MetaWebhookEntry,
+  field: string,
+  value: MetaTemplateLifecycleValue,
+  admin: SupabaseClient,
+  channel: ChannelRow,
+  nome: string,
+): Promise<void> {
 
   const idioma = (value.message_template_language ?? '').trim() || null
   // Cada campo traz UMA das duas informações. `p_status` null faz a RPC
