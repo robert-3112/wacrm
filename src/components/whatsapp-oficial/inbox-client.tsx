@@ -204,8 +204,8 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     <div className="flex h-full overflow-hidden">
       <div
         className={cn(
-          "h-full lg:flex lg:flex-none",
-          hasActiveConversation ? "hidden lg:flex" : "flex flex-1",
+          "h-full xl:flex xl:flex-none",
+          hasActiveConversation ? "hidden xl:flex" : "flex flex-1",
         )}
       >
         <ConversationList
@@ -218,8 +218,8 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
 
       <div
         className={cn(
-          "h-full min-w-0 flex-1 lg:flex",
-          hasActiveConversation ? "flex" : "hidden lg:flex",
+          "h-full min-w-0 flex-1 xl:flex",
+          hasActiveConversation ? "flex" : "hidden xl:flex",
         )}
       >
         <MessageThread

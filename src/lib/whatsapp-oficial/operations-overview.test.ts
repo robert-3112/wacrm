@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { loadOperationalOverview } from './operations-overview';
 
@@ -17,6 +17,12 @@ function fakeClient(
 ) {
   const calls: Call[] = [];
   const client = {
+    auth: {
+      getUser: async () => ({
+        data: { user: { id: 'user-1', email: 'operador@example.invalid' } },
+        error: null,
+      }),
+    },
     rpc(name: string) {
       if (name === 'os_current_tenant_id')
         return Promise.resolve({ data: tenant, error: null });
@@ -68,6 +74,23 @@ const conversationCounts = {
 };
 
 describe('loadOperationalOverview', () => {
+  it('rejects a missing session before resolving context or reading data', async () => {
+    const user = fakeClient('owner', 'sunt', conversationCounts);
+    vi.spyOn(user.client.auth, 'getUser').mockResolvedValue({
+      data: { user: null },
+      error: null,
+    } as unknown as Awaited<ReturnType<SupabaseClient['auth']['getUser']>>);
+    const rpc = vi.spyOn(user.client, 'rpc');
+    const admin = vi.fn();
+
+    await expect(
+      loadOperationalOverview(user.client, admin)
+    ).rejects.toMatchObject({ kind: 'unauthenticated' });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(user.calls).toHaveLength(0);
+    expect(admin).not.toHaveBeenCalled();
+  });
+
   it('shows only the RLS-scoped tenant conversation counts to a broker and never opens admin', async () => {
     const user = fakeClient('corretor', 'sunt', conversationCounts);
     let adminOpened = false;
@@ -104,6 +127,7 @@ describe('loadOperationalOverview', () => {
     for (const [role, tenant] of [
       ['owner', '   '],
       [null, 'sunt'],
+      ['   ', 'sunt'],
     ] as const) {
       const user = fakeClient(role, tenant, conversationCounts);
       let adminOpened = false;
