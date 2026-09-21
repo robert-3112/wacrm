@@ -47,16 +47,38 @@ function makeAdmin(overrides: Record<string, unknown> = {}) {
   const admin = {
     from: vi.fn((table: string) => {
       const filters: Record<string, unknown> = {}
+      let nonNullColumn: string | undefined
+      let orderColumn: string | undefined
+      let ascending = true
       const query = {
         select: vi.fn(() => query),
         eq: vi.fn((field: string, value: unknown) => { filters[field] = value; return query }),
-        order: vi.fn(() => query),
+        not: vi.fn((field: string, operator: string, value: unknown) => {
+          if (operator === 'is' && value === null) nonNullColumn = field
+          return query
+        }),
+        order: vi.fn((field: string, options: { ascending?: boolean }) => {
+          orderColumn = field; ascending = options.ascending !== false; return query
+        }),
         limit: vi.fn(() => query),
-        maybeSingle: vi.fn(async () => ({
-          data: table === 'whatsapp_messages' && filters.direction === 'inbound'
-            ? rows.inbound : rows[table],
-          error: null,
-        })),
+        maybeSingle: vi.fn(async () => {
+          if (table !== 'whatsapp_messages' || filters.direction !== 'inbound') {
+            return { data: rows[table], error: null }
+          }
+          const inboundRows = (Array.isArray(rows.inbound) ? rows.inbound : [rows.inbound])
+            .filter((row): row is Record<string, string | null> => !!row)
+            .filter((row) => !nonNullColumn || row[nonNullColumn] != null)
+          if (orderColumn) {
+            const column = orderColumn
+            inboundRows.sort((a, b) => {
+              // PostgreSQL's default DESC order puts NULL first.
+              const left = a[column] == null ? Infinity : Date.parse(a[column]!)
+              const right = b[column] == null ? Infinity : Date.parse(b[column]!)
+              return ascending ? left - right : right - left
+            })
+          }
+          return { data: inboundRows[0] ?? null, error: null }
+        }),
       }
       return query
     }),
@@ -90,6 +112,8 @@ function request(
 
 describe('POST /api/whatsapp-oficial/messages/media', () => {
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(NOW))
     vi.stubEnv('WHATSAPP_MEDIA_SEND_ENABLED', 'true')
     vi.stubEnv('WHATSAPP_OUTBOUND_MODE', 'live')
     vi.stubEnv('WHATSAPP_META_SEND_ENABLED', 'true')
@@ -99,7 +123,7 @@ describe('POST /api/whatsapp-oficial/messages/media', () => {
     mocks.uploadMedia.mockReset().mockResolvedValue({ mediaId: '1234567890' })
     mocks.loadChannelCredential.mockReset().mockResolvedValue('test-token')
   })
-  afterEach(() => vi.unstubAllEnvs())
+  afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers() })
 
   it('does not parse/upload when no user is authorized for the conversation', async () => {
     mocks.requireConversationAccess.mockRejectedValue(new UnauthorizedError())
@@ -136,6 +160,53 @@ describe('POST /api/whatsapp-oficial/messages/media', () => {
     const res = await POST(request())
     expect(res.status).toBe(409)
     expect(mocks.uploadMedia).not.toHaveBeenCalled()
+  })
+
+  const timestamp = (hoursAgo: number) => new Date(Date.parse(NOW) - hoursAgo * 3_600_000).toISOString()
+  it.each([
+    ['missing provider timestamp', null, NOW],
+    ['old provider timestamp despite a recent insert', timestamp(25), NOW],
+    ['exactly 24 hours', timestamp(24), NOW],
+    ['provider timestamp six seconds in the future', timestamp(-6 / 3600), NOW],
+  ])('rejects %s before credential lookup, upload, pause or enqueue', async (_name, provider, created) => {
+    const admin = makeAdmin({ inbound: { wpp_timestamp: provider, created_at: created } }); authorize(admin)
+    const res = await POST(request())
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toContain('24 horas')
+    expect(mocks.loadChannelCredential).not.toHaveBeenCalled()
+    expect(mocks.uploadMedia).not.toHaveBeenCalled()
+    expect(admin.rpc).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['recent provider with old insertion', [{ wpp_timestamp: timestamp(1), created_at: timestamp(25) }]],
+    ['just inside 24 hours', [{ wpp_timestamp: timestamp(24 - 1 / 3600), created_at: NOW }]],
+    ['four seconds of clock skew', [{ wpp_timestamp: timestamp(-4 / 3600), created_at: NOW }]],
+    ['exactly five seconds of clock skew', [{ wpp_timestamp: timestamp(-5 / 3600), created_at: NOW }]],
+    ['null provider alongside valid inbound', [
+      { wpp_timestamp: timestamp(1), created_at: timestamp(1) },
+      { wpp_timestamp: null, created_at: timestamp(-6 / 3600) },
+    ]],
+    ['old inbound inserted after a valid inbound', [
+      { wpp_timestamp: timestamp(1), created_at: timestamp(1) },
+      { wpp_timestamp: timestamp(25), created_at: NOW },
+    ]],
+  ])('accepts %s using the latest non-null provider timestamp', async (_name, inbound) => {
+    const admin = makeAdmin({ inbound }); authorize(admin)
+    const res = await POST(request())
+    expect(res.status).toBe(201)
+    expect(mocks.uploadMedia).toHaveBeenCalledTimes(1)
+    expect(admin.rpc).toHaveBeenCalledWith('whatsapp_oficial_enfileirar_midia', expect.any(Object))
+  })
+
+  it('replays a committed request after the provider window closes without any new side effects', async () => {
+    const admin = makeAdmin({ whatsapp_messages: stagedMessage, inbound: null }); authorize(admin)
+    const res = await POST(request())
+    expect(res.status).toBe(200)
+    expect((await res.json()).replayed).toBe(true)
+    expect(mocks.loadChannelCredential).not.toHaveBeenCalled()
+    expect(mocks.uploadMedia).not.toHaveBeenCalled()
+    expect(admin.rpc).not.toHaveBeenCalled()
   })
 
   it('rejects a fake PDF before upload', async () => {
