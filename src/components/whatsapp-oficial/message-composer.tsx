@@ -40,6 +40,8 @@ interface MessageComposerProps {
    */
   envioReal: boolean;
   onSent: (message: WhatsAppMessage) => void;
+  /** The send paused Sophia first (human takeover); carries replies already in flight. */
+  onSophiaPaused?: (inFlightReplies: number) => void;
 }
 
 export function MessageComposer({
@@ -48,6 +50,7 @@ export function MessageComposer({
   disabledReason,
   envioReal,
   onSent,
+  onSophiaPaused,
 }: MessageComposerProps) {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -115,7 +118,11 @@ export function MessageComposer({
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     onSent(result.data.message);
-  }, [text, file, sending, disabled, mediaAvailable, envioReal, conversationId, onSent]);
+    if (result.data.sophia_pausada) {
+      toast.info("Sophia pausada: você assumiu esta conversa.");
+      onSophiaPaused?.(result.data.in_flight_replies ?? 0);
+    }
+  }, [text, file, sending, disabled, mediaAvailable, envioReal, conversationId, onSent, onSophiaPaused]);
 
   const handleFileSelected = useCallback((selected: File | undefined) => {
     if (!selected) return;

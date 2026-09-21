@@ -1,5 +1,5 @@
 import type { WhatsAppMessage } from '@/types/whatsapp-oficial'
-import type { ActionResult } from './inbox-actions'
+import type { ActionResult, SophiaPauseInfo } from './inbox-actions'
 
 export function asyncMediaAvailability(): Promise<boolean> {
   return fetch('/api/whatsapp-oficial/messages/media')
@@ -13,7 +13,7 @@ export async function sendInboxMedia(
   clientRequestId: string,
   file: File,
   caption: string,
-): Promise<ActionResult<{ ok: true; message: WhatsAppMessage; replayed: boolean }>> {
+): Promise<ActionResult<{ ok: true; message: WhatsAppMessage; replayed: boolean } & SophiaPauseInfo>> {
   const form = new FormData()
   form.set('file', file)
   form.set('caption', caption)

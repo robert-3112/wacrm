@@ -14,9 +14,15 @@ interface SophiaState {
 export function SophiaToggle({
   conversationId,
   onConversationChanged,
+  onPaused,
+  refreshKey = 0,
 }: {
   conversationId: string
   onConversationChanged: () => void
+  /** Called after a successful pause with the replies already in flight. */
+  onPaused?: (inFlightReplies: number) => void
+  /** Bump to re-read the state after something else (a human send) changed it. */
+  refreshKey?: number
 }) {
   const [state, setState] = useState<SophiaState | null>(null)
   const [saving, setSaving] = useState(false)
@@ -39,7 +45,7 @@ export function SophiaToggle({
     }
     void load()
     return () => controller.abort()
-  }, [conversationId])
+  }, [conversationId, refreshKey])
 
   if (!state?.supported) return null
 
@@ -57,12 +63,14 @@ export function SophiaToggle({
         error?: string
         sophia_ativa?: boolean
         cancelled_replies?: number
+        in_flight_replies?: number
       }
       if (!response.ok || result.sophia_ativa !== next) {
         throw new Error(result.error ?? 'Não foi possível alterar a Sophia.')
       }
       setState({ supported: true, sophia_ativa: next })
       toast.success(next ? 'Sophia ativada nesta conversa.' : 'Sophia pausada; atendimento humano ativo.')
+      if (!next) onPaused?.(result.in_flight_replies ?? 0)
       onConversationChanged()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Falha ao alterar a Sophia.')

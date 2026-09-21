@@ -47,10 +47,10 @@ describe('human Sophia pause', () => {
 
   it('requires a boolean and calls the atomic RPC with the real actor', async () => {
     expect((await PATCH(patch('false'), params)).status).toBe(400)
-    rpc.mockResolvedValue({ data: { ok: true, sophia_ativa: false, cancelled_replies: 1 }, error: null })
+    rpc.mockResolvedValue({ data: { ok: true, sophia_ativa: false, cancelled_replies: 1, in_flight_replies: 1 }, error: null })
     const response = await PATCH(patch(false), params)
     expect(response.status).toBe(200)
-    expect(await response.json()).toMatchObject({ sophia_ativa: false, cancelled_replies: 1 })
+    expect(await response.json()).toMatchObject({ sophia_ativa: false, cancelled_replies: 1, in_flight_replies: 1 })
     expect(rpc).toHaveBeenCalledWith('whatsapp_sophia_definir_estado', {
       p_conversation_id: ID, p_actor_user_id: 'user-1', p_ativa: false,
     })

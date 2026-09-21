@@ -74,7 +74,7 @@ export async function PATCH(request: Request, { params }: Params): Promise<Respo
       p_ativa: body.ativa,
     })
     if (error) throw error
-    const result = data as { ok?: boolean; reason?: string; sophia_ativa?: boolean; cancelled_replies?: number }
+    const result = data as { ok?: boolean; reason?: string; sophia_ativa?: boolean; cancelled_replies?: number; in_flight_replies?: number }
     if (result?.ok !== true) {
       return NextResponse.json({ error: result?.reason ?? 'Alteração recusada.' }, { status: 409 })
     }

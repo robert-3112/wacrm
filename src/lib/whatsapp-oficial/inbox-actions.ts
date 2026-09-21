@@ -19,6 +19,20 @@ import type {
   WhatsAppMessage,
 } from '@/types/whatsapp-oficial'
 
+/** Sent by the human send routes when the send paused Sophia first. */
+export interface SophiaPauseInfo {
+  sophia_pausada?: boolean
+  in_flight_replies?: number
+}
+
+/** Operator-facing warning: replies the worker already took cannot be recalled by a pause. */
+export function sophiaInFlightNotice(inFlight: number | undefined): string | null {
+  if (!inFlight || inFlight < 1) return null
+  return inFlight === 1
+    ? '1 resposta da Sophia já estava sendo enviada e pode chegar ao cliente.'
+    : `${inFlight} respostas da Sophia já estavam sendo enviadas e podem chegar ao cliente.`
+}
+
 export interface ActionSuccess<T> {
   ok: true
   data: T
@@ -68,7 +82,7 @@ async function request<T>(
 export function sendTextMessage(
   conversationId: string,
   content: string,
-): Promise<ActionResult<{ ok: true; message: WhatsAppMessage }>> {
+): Promise<ActionResult<{ ok: true; message: WhatsAppMessage } & SophiaPauseInfo>> {
   return request('/api/whatsapp-oficial/messages/send', 'POST', { conversationId, content })
 }
 

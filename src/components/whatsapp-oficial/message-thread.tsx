@@ -20,7 +20,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ArrowLeft, CheckCircle2, Loader2, Repeat, UserX } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Loader2, Repeat, UserX, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -34,7 +34,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { leadDisplayName } from "@/lib/whatsapp-oficial/inbox-data";
-import { registerHandoff, registerOptout, updateConversationStatus } from "@/lib/whatsapp-oficial/inbox-actions";
+import { registerHandoff, registerOptout, sophiaInFlightNotice, updateConversationStatus } from "@/lib/whatsapp-oficial/inbox-actions";
 import { MessageBubble } from "./message-bubble";
 import { MessageComposer } from "./message-composer";
 import { SophiaToggle } from "./sophia-toggle";
@@ -81,6 +81,9 @@ export function MessageThread({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [optoutOpen, setOptoutOpen] = useState(false);
+  // Sophia notice is tied to the conversation it was raised in.
+  const [sophiaNotice, setSophiaNotice] = useState<{ conversationId: string; text: string } | null>(null);
+  const [sophiaRefresh, setSophiaRefresh] = useState(0);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -97,6 +100,12 @@ export function MessageThread({
   }
 
   const name = leadDisplayName(conversation);
+  const conversationId = conversation.id;
+  const handleSophiaPaused = (inFlightReplies: number) => {
+    const text = sophiaInFlightNotice(inFlightReplies);
+    setSophiaNotice(text ? { conversationId, text } : null);
+  };
+  const notice = sophiaNotice?.conversationId === conversationId ? sophiaNotice.text : null;
   const phone = conversation.lead?.whatsapp;
   const isClosed = conversation.status === "encerrada";
   const isOptedOut = Boolean(conversation.optout_em);
@@ -117,6 +126,8 @@ export function MessageThread({
         onOpenHandoff={() => setHandoffOpen(true)}
         onOpenOptout={() => setOptoutOpen(true)}
         onConversationChanged={onConversationChanged}
+        onSophiaPaused={handleSophiaPaused}
+        sophiaRefresh={sophiaRefresh}
         onBack={onBack}
       />
 
@@ -134,6 +145,18 @@ export function MessageThread({
         )}
       </div>
 
+      {notice && (
+        <div
+          role="status"
+          className="flex items-start gap-2 border-t border-border bg-amber-500/10 px-4 py-2 text-xs font-medium text-amber-700 dark:text-amber-400"
+        >
+          <p className="flex-1">{notice}</p>
+          <Button variant="ghost" size="icon-sm" aria-label="Fechar aviso da Sophia" onClick={() => setSophiaNotice(null)}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
+
       <MessageComposer
         key={conversation.id}
         conversationId={conversation.id}
@@ -141,6 +164,10 @@ export function MessageThread({
         disabledReason={composerDisabledReason}
         envioReal={envioReal}
         onSent={onMessageSent}
+        onSophiaPaused={(inFlightReplies) => {
+          handleSophiaPaused(inFlightReplies);
+          setSophiaRefresh((value) => value + 1);
+        }}
       />
 
       <HandoffDialog
@@ -167,6 +194,8 @@ function ThreadHeader({
   onOpenHandoff,
   onOpenOptout,
   onConversationChanged,
+  onSophiaPaused,
+  sophiaRefresh,
   onBack,
 }: {
   conversation: WhatsAppConversation;
@@ -175,6 +204,8 @@ function ThreadHeader({
   onOpenHandoff: () => void;
   onOpenOptout: () => void;
   onConversationChanged: () => void;
+  onSophiaPaused: (inFlightReplies: number) => void;
+  sophiaRefresh: number;
   onBack?: () => void;
 }) {
   const [togglingStatus, setTogglingStatus] = useState(false);
@@ -230,6 +261,8 @@ function ThreadHeader({
         <SophiaToggle
           conversationId={conversation.id}
           onConversationChanged={onConversationChanged}
+          onPaused={onSophiaPaused}
+          refreshKey={sophiaRefresh}
         />
         <Button
           variant="outline"
