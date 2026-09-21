@@ -135,11 +135,12 @@ export async function POST(request: Request): Promise<Response> {
       return NextResponse.json({ error: 'Contato inativo ou fora do piloto' }, { status: 409 })
     }
     const { data: inbound, error: inboundError } = await admin.from('whatsapp_messages')
-      .select('wpp_timestamp,created_at').eq('tenant_id', conversation.tenant_id)
+      .select('wpp_timestamp').eq('tenant_id', conversation.tenant_id)
       .eq('conversation_id', conversation.id).eq('direction', 'inbound')
-      .order('created_at', { ascending: false }).limit(1).maybeSingle()
+      .not('wpp_timestamp', 'is', null)
+      .order('wpp_timestamp', { ascending: false }).limit(1).maybeSingle()
     if (inboundError) throw inboundError
-    if (!isInsideFreeFormWindow(inbound?.wpp_timestamp ?? inbound?.created_at)) {
+    if (!isInsideFreeFormWindow(inbound?.wpp_timestamp)) {
       return NextResponse.json({ error: 'Fora da janela de 24 horas; use um template aprovado' }, { status: 409 })
     }
 
