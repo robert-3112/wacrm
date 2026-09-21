@@ -87,14 +87,14 @@ describe('POST /api/v1/sophia/replies', () => {
 
   it('returns the original message on a same-content retry (200, idempotent_replay)', async () => {
     rpc.mockResolvedValue({
-      data: { ok: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'enviado',
+      data: { ok: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'enviada',
         idempotent_replay: true },
       error: null,
     })
     const response = await POST(request({ claimId: CLAIM_ID, claimToken: TOKEN, content: 'Olá' }))
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
-      data: { enfileirado: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'enviado',
+      data: { enfileirado: true, message_id: 'message-1', conversation_id: 'conversation-1', status: 'enviada',
         idempotent_replay: true },
     })
   })

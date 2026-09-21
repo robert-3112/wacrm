@@ -8,8 +8,8 @@ export interface SophiaHumanPause {
   in_flight_replies: number
 }
 
-// PostgREST/Postgres codes for "column or function not deployed yet".
-const NOT_DEPLOYED = new Set(['42703', '42883', 'PGRST202', 'PGRST204'])
+// Only a missing column proves this database cannot have Sophia enabled.
+const NOT_DEPLOYED = new Set(['42703', 'PGRST204'])
 
 function notDeployed(error: { code?: string } | null | undefined): boolean {
   return typeof error?.code === 'string' && NOT_DEPLOYED.has(error.code)
@@ -45,7 +45,7 @@ export async function pauseSophiaForHumanSend(
     console.error('[whatsapp-oficial/sophia-pause] state read failed:', stateError.message)
     return refuse(500)
   }
-  if (state?.sophia_ativa !== true) return idle
+  if (typeof state?.sophia_ativa !== 'boolean') return refuse(409)
 
   const { data, error } = await admin.rpc('whatsapp_sophia_definir_estado', {
     p_conversation_id: conversation.id,
@@ -53,16 +53,14 @@ export async function pauseSophiaForHumanSend(
     p_ativa: false,
   })
   if (error) {
-    if (notDeployed(error)) {
-      console.warn('[whatsapp-oficial/sophia-pause] whatsapp_sophia_definir_estado not deployed; sending anyway')
-      return idle
-    }
     if (isPostgrestPermissionError(error)) return refuse(403)
     console.error('[whatsapp-oficial/sophia-pause] pause RPC failed:', error.message)
     return refuse(500)
   }
-  const result = data as { ok?: boolean; reason?: string; in_flight_replies?: unknown } | null
-  if (result?.ok !== true) {
+  const result = data as { ok?: boolean; reason?: string; sophia_ativa?: boolean; in_flight_replies?: unknown } | null
+  // Evolution has no Meta Sophia contract. An active/unknown state never bypasses the pause.
+  if (state.sophia_ativa === false && result?.ok === false && result.reason === 'canal_nao_meta') return idle
+  if (result?.ok !== true || result.sophia_ativa !== false) {
     console.error('[whatsapp-oficial/sophia-pause] pause refused:', result?.reason)
     return refuse(409)
   }
