@@ -7,6 +7,7 @@ import { MetaApiError, uploadMedia } from '@/lib/whatsapp-oficial/meta-api'
 import { isInsideFreeFormWindow } from '@/lib/whatsapp-oficial/meta-window'
 import { MediaValidationError, validateOutboundMedia } from '@/lib/whatsapp-oficial/outbound-media'
 import { WHATSAPP_OFICIAL_RATE_LIMITS, checkRateLimit, rateLimitResponse } from '@/lib/whatsapp-oficial/rate-limit'
+import { pauseSophiaForHumanSend } from '@/lib/whatsapp-oficial/sophia-pause'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -162,6 +163,8 @@ export async function POST(request: Request): Promise<Response> {
       }
       return NextResponse.json({ error: 'Falha ao carregar mídia na Meta; tente novamente' }, { status: 502 })
     }
+    const sophia = await pauseSophiaForHumanSend(admin, conversation, userId)
+    if (sophia instanceof Response) return sophia
     const { data, error } = await admin.rpc('whatsapp_oficial_enfileirar_midia', {
       p_conversation_id: conversation.id,
       p_actor_user_id: userId,
@@ -182,7 +185,7 @@ export async function POST(request: Request): Promise<Response> {
     if (!result?.ok || !result.message) {
       return NextResponse.json({ error: result?.reason ?? 'media_enqueue_rejected' }, { status: 409 })
     }
-    return NextResponse.json({ ok: true, message: result.message, replayed: result.replayed === true },
+    return NextResponse.json({ ok: true, message: result.message, replayed: result.replayed === true, ...sophia },
       { status: result.replayed ? 200 : 201 })
   } catch (error) {
     if (error instanceof PayloadTooLargeError) {

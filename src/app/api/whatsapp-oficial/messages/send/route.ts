@@ -9,6 +9,7 @@ import {
   checkRateLimit,
   rateLimitResponse,
 } from '@/lib/whatsapp-oficial/rate-limit'
+import { pauseSophiaForHumanSend } from '@/lib/whatsapp-oficial/sophia-pause'
 
 /**
  * Queue a text reply for an official-channel conversation. The request is
@@ -53,6 +54,9 @@ export async function POST(request: Request): Promise<Response> {
     )
     if (!rl.success) return rateLimitResponse(rl)
 
+    const sophia = await pauseSophiaForHumanSend(admin, conversation, userId)
+    if (sophia instanceof Response) return sophia
+
     const { data, error } = await admin.rpc('whatsapp_oficial_enfileirar_mensagem', {
       p_conversation_id: conversation.id,
       p_content: content,
@@ -79,7 +83,7 @@ export async function POST(request: Request): Promise<Response> {
       return NextResponse.json({ error: result?.reason ?? 'message_enqueue_rejected' }, { status })
     }
 
-    return NextResponse.json({ ok: true, message: result.message }, { status: 201 })
+    return NextResponse.json({ ok: true, message: result.message, ...sophia }, { status: 201 })
   } catch (error) {
     return toErrorResponse(error)
   }

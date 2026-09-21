@@ -3,6 +3,11 @@ import { __resetRateLimitForTests } from '@/lib/rate-limit'
 
 const mocks = vi.hoisted(() => ({
   requireConversationAccess: vi.fn(),
+  pauseSophiaForHumanSend: vi.fn(),
+}))
+
+vi.mock('@/lib/whatsapp-oficial/sophia-pause', () => ({
+  pauseSophiaForHumanSend: mocks.pauseSophiaForHumanSend,
 }))
 
 vi.mock('@/lib/whatsapp-oficial/api-auth', async () => {
@@ -73,6 +78,8 @@ function authorizedContext(admin: ReturnType<typeof makeAdmin>) {
 describe('POST /api/whatsapp-oficial/messages/send', () => {
   beforeEach(() => {
     mocks.requireConversationAccess.mockReset()
+    mocks.pauseSophiaForHumanSend.mockReset()
+    mocks.pauseSophiaForHumanSend.mockResolvedValue({ sophia_pausada: false, in_flight_replies: 0 })
     __resetRateLimitForTests()
   })
 
@@ -154,5 +161,28 @@ describe('POST /api/whatsapp-oficial/messages/send', () => {
 
     const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
     expect(res.status).toBe(409)
+  })
+
+  it('pauses Sophia before queueing the human message and reports replies in flight', async () => {
+    const admin = makeAdmin()
+    mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
+    mocks.pauseSophiaForHumanSend.mockResolvedValue({ sophia_pausada: true, in_flight_replies: 1 })
+
+    const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
+    expect(res.status).toBe(201)
+    expect(await res.json()).toMatchObject({ ok: true, sophia_pausada: true, in_flight_replies: 1 })
+    expect(mocks.pauseSophiaForHumanSend).toHaveBeenCalledWith(admin, expect.objectContaining({ id: 'conv-1' }), 'owner-corretor')
+    expect(mocks.pauseSophiaForHumanSend.mock.invocationCallOrder[0])
+      .toBeLessThan(admin.rpc.mock.invocationCallOrder[0])
+  })
+
+  it('does not queue the human message when the pause fails', async () => {
+    const admin = makeAdmin()
+    mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
+    mocks.pauseSophiaForHumanSend.mockResolvedValue(Response.json({ error: 'pausa falhou' }, { status: 500 }))
+
+    const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
+    expect(res.status).toBe(500)
+    expect(admin.rpc).not.toHaveBeenCalled()
   })
 })

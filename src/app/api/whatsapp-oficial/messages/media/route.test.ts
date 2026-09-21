@@ -157,6 +157,25 @@ describe('POST /api/whatsapp-oficial/messages/media', () => {
     })
   })
 
+  it('pauses an active Sophia before enqueueing, and does not enqueue if the pause fails', async () => {
+    const conversation = { id: '11111111-1111-4111-8111-111111111111', status: 'aberta', optout_em: null, sophia_ativa: true }
+    const admin = makeAdmin({ whatsapp_conversations: conversation }); authorize(admin)
+    admin.rpc.mockImplementation(async (name: string) => name === 'whatsapp_sophia_definir_estado'
+      ? { data: { ok: true, sophia_ativa: false, cancelled_replies: 0, in_flight_replies: 2 }, error: null }
+      : { data: { ok: true, message: stagedMessage, replayed: false }, error: null })
+    const res = await POST(request())
+    expect(res.status).toBe(201)
+    expect(await res.json()).toMatchObject({ sophia_pausada: true, in_flight_replies: 2 })
+    expect(admin.rpc.mock.calls.map(([name]) => name))
+      .toEqual(['whatsapp_sophia_definir_estado', 'whatsapp_oficial_enfileirar_midia'])
+
+    __resetRateLimitForTests()
+    const failing = makeAdmin({ whatsapp_conversations: conversation }); authorize(failing)
+    failing.rpc.mockResolvedValue({ data: null, error: { code: 'XX000', message: 'db down' } })
+    expect((await POST(request())).status).toBe(500)
+    expect(failing.rpc).toHaveBeenCalledTimes(1)
+  })
+
   it('queues a captionless MP3 as audio', async () => {
     const admin = makeAdmin(); authorize(admin)
     const audio = new File([new Uint8Array([0xff, 0xfb, 0x90, 0x64])],
