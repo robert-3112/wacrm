@@ -67,6 +67,7 @@ function makeAdmin(
     missingMessageIds?: Set<string>
     recipients?: Record<string, Array<{ tenant_id: string; broadcast_id: string }>>
     broadcasts?: Record<string, { status: string; tenant_id: string; canal_id: string }>
+    channelStatuses?: Array<'ativo' | 'inativo' | 'pausado'>
     failSelectForTables?: Set<string>
     failUpdateForIds?: Set<string>
     lostClaimForIds?: Set<string>
@@ -75,6 +76,7 @@ function makeAdmin(
   const calls: MockCall[] = []
   const rpcCalls: Array<Record<string, unknown>> = []
   const messages: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string }> = { ...(opts.messages ?? {}) }
+  let channelReadCount = 0
 
   const admin = {
     rpc: async (_name: string, args: Record<string, unknown>) => {
@@ -156,6 +158,12 @@ function makeAdmin(
             }
             if (table === 'whatsapp_broadcasts') {
               return { data: opts.broadcasts?.[id] ?? null, error: null }
+            }
+            if (table === 'whatsapp_channels') {
+              return {
+                data: { tenant_id: 't-1', status: opts.channelStatuses?.[channelReadCount++] ?? 'ativo' },
+                error: null,
+              }
             }
             return { data: null, error: null }
           },
@@ -469,7 +477,6 @@ describe('processOutboxBatch — live failure', () => {
 describe('processOutboxBatch — permanent business blocks (dead-letter, no network)', () => {
   const permanentBlockCases: Array<[string, Partial<OutboxJob>, boolean]> = [
     ['conversa_optout', { conversa_optout_em: '2026-07-01T00:00:00Z' }, false],
-    ['canal_inativo', { canal_status: 'inativo' }, false],
     ['lead_inativo', { lead_status_saida: 'inativo' }, false],
     ['fora_da_janela_24h', {}, true],
   ]
@@ -496,6 +503,47 @@ describe('processOutboxBatch — permanent business blocks (dead-letter, no netw
       expect(loadChannelCredential).not.toHaveBeenCalled()
     },
   )
+})
+
+describe('processOutboxBatch — canal pausado', () => {
+  it('keeps a job pending when an old claim still carries a paused snapshot', async () => {
+    const job = makeJob({ canal_status: 'pausado' })
+    const { admin, calls, messages } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.blocked).toBe(1)
+    expect(result.deadLettered).toBe(0)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente', claimed_by: null, claimed_at: null })
+    expect(outboxUpdates(calls)[0].values?.attempts).toBeUndefined()
+    expect(messages['msg-1']).toBeUndefined()
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('rechecks after the claim, then resumes once without duplicating the provider call', async () => {
+    const job = makeJob()
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      channelStatuses: ['pausado', 'ativo'],
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    vi.mocked(adapterMock.send).mockResolvedValue({ providerMessageId: 'wamid-test' })
+    const flags = makeFlags({ mode: 'live' })
+
+    const paused = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+    expect(paused.blocked).toBe(1)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+
+    const resumed = await processOutboxBatch({ admin, flags, workerId: 'w1' })
+    expect(resumed.sent).toBe(1)
+    expect(adapterMock.send).toHaveBeenCalledTimes(1)
+    expect(outboxUpdates(calls).at(-1)?.values).toMatchObject({ status: 'enviado' })
+
+    // An accidentally redelivered claim sees the linked message as terminal.
+    await processOutboxBatch({ admin, flags, workerId: 'w1' })
+    expect(adapterMock.send).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('processOutboxBatch — janela de 24h da Meta usa isTemplateJob, não job.tipo', () => {

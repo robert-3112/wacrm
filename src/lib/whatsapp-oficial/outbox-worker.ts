@@ -202,7 +202,6 @@ async function readLinkedMessageState(
  * again. Order matches the spec — the first matching reason wins.
  */
 function detectPermanentBlock(job: OutboxJob, adapter: OutboundAdapter, now: Date): string | null {
-  if (job.canal_status !== 'ativo') return 'canal_inativo'
   if (job.conversa_optout_em != null) return 'conversa_optout'
   if (job.lead_status_saida !== 'ativo') return 'lead_inativo'
   if (job.conversa_status === 'encerrada') return 'conversa_encerrada'
@@ -282,6 +281,19 @@ const ALLOWLIST_REQUEUE_DELAY_S = 3600
 const CAMPAIGN_REQUEUE_DELAY_S = 300
 const CAMPAIGN_INVALID_REQUEUE_DELAY_S = 3600
 const PREFLIGHT_REQUEUE_DELAY_S = 300
+const CHANNEL_REQUEUE_DELAY_S = 300
+
+/** Recheck the channel after a claim and just before provider I/O. A pause
+ * racing with claim must preserve the queued message, not dead-letter it. */
+async function channelIsActive(admin: SupabaseClient, job: OutboxJob): Promise<boolean> {
+  const { data, error } = await admin.from('whatsapp_channels')
+    .select('status,tenant_id')
+    .eq('id', job.canal_id)
+    .maybeSingle()
+  if (error) throw new Error(`failed to read channel status: ${error.message}`)
+  if (!data || data.tenant_id !== job.tenant_id) throw new Error('channel_link_invalid')
+  return data.status === 'ativo'
+}
 
 type CampaignState = 'active' | 'paused' | 'cancelled' | 'invalid'
 
@@ -364,6 +376,14 @@ async function handleJob(
   const now = clock()
   const adapter = getAdapter(job.provider)
 
+  // Older claims can carry a paused snapshot. Do not make that a permanent
+  // business failure: resume should send the same job once it is eligible.
+  if (job.canal_status !== 'ativo') {
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'canal_pausado' })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
+  }
+
   // a) permanent business block.
   const blockReason = detectPermanentBlock(job, adapter, now)
   if (blockReason) {
@@ -419,6 +439,14 @@ async function handleJob(
   // A claim may predate a pause/cancellation. Do not let already queued jobs bypass it.
   const campaignBlock = await guardCampaign(admin, flags, workerId, job, now)
   if (campaignBlock) return campaignBlock
+
+  // A pause can land after the database selected candidates. Check again
+  // before even simulating, so shadow runs preserve the pending job too.
+  if (!await channelIsActive(admin, job)) {
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'canal_pausado' })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
+  }
 
   // d) shadow — no provider call, no credential read, whatsapp_messages untouched.
   //
@@ -487,6 +515,12 @@ async function handleJob(
   // by reading the campaign again immediately before the provider call.
   const lastCampaignBlock = await guardCampaign(admin, flags, workerId, job, now)
   if (lastCampaignBlock) return lastCampaignBlock
+
+  if (!await channelIsActive(admin, job)) {
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'canal_pausado' })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
+  }
 
   let providerMessageId: string
   try {
