@@ -214,9 +214,9 @@ export function TravasSaidaPainel({
           <p className="mt-3 flex items-start gap-1.5 text-xs">
             <Info className="mt-0.5 size-3.5 shrink-0" />
             <span>
-              Campanha só sai com os <strong className="text-foreground">dois</strong> kill
-              switches de broadcast ligados. Com qualquer um desligado, os itens ficam parados na
-              outbox — aprovar não faz nada chegar a ninguém.
+              O processamento de campanhas neste ambiente exige as <strong className="text-foreground">duas</strong> travas
+              ligadas. Aprovar uma campanha pode disponibilizar itens na fila compartilhada;
+              estas configurações não garantem que outro ambiente esteja com os envios pausados.
             </span>
           </p>
         )}
