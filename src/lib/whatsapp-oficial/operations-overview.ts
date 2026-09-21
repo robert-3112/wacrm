@@ -22,6 +22,52 @@ export interface OperationalOverview {
 
 const MANAGEMENT_ROLES = new Set(['owner', 'admin', 'gestor', 'lider']);
 
+export class OperationalScopeError extends Error {
+  constructor(readonly kind: 'unauthenticated' | 'unavailable') {
+    super(
+      kind === 'unauthenticated'
+        ? 'Sessão necessária'
+        : 'Não foi possível confirmar o tenant e o papel da sessão'
+    );
+    this.name = 'OperationalScopeError';
+  }
+}
+
+export interface OperationalScope {
+  tenantId: string;
+  role: string;
+  userEmail: string | null;
+  isManagement: boolean;
+}
+
+/** Resolve access beside each read; layouts persist across navigation. */
+export async function loadOperationalScope(
+  userClient: SupabaseClient
+): Promise<OperationalScope> {
+  const {
+    data: { user },
+    error: authError,
+  } = await userClient.auth.getUser();
+  if (authError || !user) throw new OperationalScopeError('unauthenticated');
+  const [tenantResult, roleResult] = await Promise.all([
+    userClient.rpc('os_current_tenant_id'),
+    userClient.rpc('current_user_role'),
+  ]);
+  const tenantId =
+    typeof tenantResult.data === 'string' ? tenantResult.data.trim() : '';
+  const role =
+    typeof roleResult.data === 'string' ? roleResult.data.trim() : '';
+  if (tenantResult.error || roleResult.error || !tenantId || !role) {
+    throw new OperationalScopeError('unavailable');
+  }
+  return {
+    tenantId,
+    role,
+    userEmail: user.email ?? null,
+    isManagement: MANAGEMENT_ROLES.has(role),
+  };
+}
+
 /** A count never returns rows. Null means unavailable, not an empty queue. */
 async function countRows(
   client: SupabaseClient,
@@ -58,21 +104,9 @@ export async function loadOperationalOverview(
   userClient: SupabaseClient,
   adminClient: () => SupabaseClient
 ): Promise<OperationalOverview> {
-  const [tenantResult, roleResult] = await Promise.all([
-    userClient.rpc('os_current_tenant_id'),
-    userClient.rpc('current_user_role'),
-  ]);
-  const tenantId =
-    typeof tenantResult.data === 'string' ? tenantResult.data.trim() : '';
-  if (tenantResult.error || !tenantId) {
-    throw new Error('Não foi possível confirmar o tenant da sessão');
-  }
-  if (roleResult.error || typeof roleResult.data !== 'string') {
-    throw new Error('Não foi possível confirmar o papel da sessão');
-  }
-
+  const { tenantId, isManagement } = await loadOperationalScope(userClient);
   const counts = await loadOverviewCounts(userClient, tenantId);
-  if (!MANAGEMENT_ROLES.has(roleResult.data)) {
+  if (!isManagement) {
     return { counts, management: null };
   }
 

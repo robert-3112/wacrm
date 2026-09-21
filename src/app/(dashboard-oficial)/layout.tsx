@@ -39,7 +39,7 @@ export default async function DashboardOficialLayout({
   }
 
   return (
-    <div className="bg-background flex h-dvh min-h-0 flex-col overflow-hidden">
+    <div className="bg-background flex h-dvh min-h-0 flex-col overflow-hidden lg:flex-row">
       <a
         href="#conteudo-whathub"
         className="focus:bg-background focus:text-foreground focus:ring-ring sr-only focus:not-sr-only focus:fixed focus:z-50 focus:m-3 focus:rounded-md focus:px-4 focus:py-2 focus:ring-2"
@@ -49,7 +49,7 @@ export default async function DashboardOficialLayout({
       <OficialInboxHeader userEmail={user.email ?? null} />
       <main
         id="conteudo-whathub"
-        className="min-h-0 flex-1 overflow-hidden"
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
         tabIndex={-1}
       >
         {children}
