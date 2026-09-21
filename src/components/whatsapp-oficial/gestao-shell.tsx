@@ -147,10 +147,9 @@ function LinhaTrava({
 /**
  * Painel do estado de saída.
  *
- * A frase que o operador precisa ler PRIMEIRO é "nada é enviado de verdade", e
- * por isso ela é o título quando o modo é shadow — não um rodapé cinza. O
- * backend responde `enfileirado: true` justamente para não deixar ninguém
- * concluir "enviado"; a tela repete a mesma disciplina.
+ * O modo é do processador local, não uma garantia sobre a fila compartilhada.
+ * Outro ambiente pode consumir os mesmos itens com envio real habilitado.
+ * Enfileirar não comprova envio nem assegura simulação.
  *
  * `compacto` é para a tela de detalhe, onde o painel divide espaço com a
  * decisão de aprovar: lá vale o aviso curto, com o detalhamento só na lista de
@@ -175,13 +174,13 @@ export function TravasSaidaPainel({
       {shadow ? <ShieldCheck /> : <ShieldOff />}
       <AlertTitle>
         {shadow
-          ? "Modo shadow — nada é enviado de verdade"
+          ? "Este ambiente está configurado para simulação"
           : "Modo live — mensagens podem sair para números reais"}
       </AlertTitle>
       <AlertDescription>
         <p>
           {shadow
-            ? "Tudo que você enfileirar aqui é simulado pelo worker da outbox: a mensagem é marcada como simulada e nenhum provedor é chamado. Nenhum cliente recebe nada."
+            ? "O processamento neste ambiente não envia mensagens ao WhatsApp. Porém, a fila pode ser compartilhada com outro ambiente que faz envios reais. Confirme com a gestão antes de enfileirar mensagens ou aprovar campanhas."
             : "O modo de saída está em live. Confira as travas abaixo antes de aprovar qualquer campanha."}
         </p>
         <ul className="mt-3 space-y-1.5 text-xs">
