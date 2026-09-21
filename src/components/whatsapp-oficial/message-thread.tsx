@@ -59,10 +59,8 @@ interface MessageThreadProps {
    *  the conversation (its `lead` join in particular) — those RPCs touch
    *  `public.leads`, which realtime here doesn't watch directly. */
   onConversationChanged: () => void;
-  /** Mobile-only "back to list" affordance — the page hides the
-   *  conversation list pane below `lg` while a thread is open (see
-   *  `(dashboard-oficial)/whatsapp-oficial/inbox/page.tsx`), so this is the only way back
-   *  without a browser-level back navigation. Rendered only when provided. */
+  /** Back to list below `xl`, where InboxClient alternates list and thread
+   *  to leave room for the platform navigation and lead context. */
   onBack?: () => void;
   /** Repassado ao composer: com o envio real desligado a mensagem NÃO chega ao
    *  cliente, e o operador precisa saber disso antes de digitar. */
@@ -231,7 +229,7 @@ function ThreadHeader({
           <Button
             variant="ghost"
             size="icon-sm"
-            className="lg:hidden"
+            className="xl:hidden"
             onClick={onBack}
             aria-label="Voltar para a lista de conversas"
           >
