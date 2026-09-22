@@ -94,7 +94,7 @@ describe('platform entry panels', () => {
       />
     );
     expect(html).toContain('Não verificado');
-    expect(html).toContain('Kill switch');
+    expect(html).toContain('Liberação de campanhas na gestão');
     expect(html).not.toContain('type="checkbox"');
     expect(html).not.toContain('tenant-1');
   });

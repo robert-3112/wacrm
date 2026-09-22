@@ -179,6 +179,7 @@ export function MessageThread({
       </div>
       {templateConversationId === conversation.id && <InboxTemplateDialog
         key={conversation.id} conversationId={conversation.id} canalId={conversation.canal_id} contactName={name}
+        blockedReason={isOptedOut ? "Este contato pediu para não receber mensagens." : isClosed ? "Conversa encerrada. Reabra antes de enviar." : undefined}
         onClose={() => setTemplateConversationId(null)} onSent={onMessageSent}
         onSophiaPaused={(inFlightReplies) => { handleSophiaPaused(inFlightReplies); setSophiaRefresh(value => value + 1) }}
       />}

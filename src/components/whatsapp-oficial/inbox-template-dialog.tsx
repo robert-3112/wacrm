@@ -13,8 +13,9 @@ import { traduzirErro } from '@/lib/whatsapp-oficial/gestao-erros'
 import { camposFaltando, derivarCamposTemplate, montarVariaveisPadrao, motivoTemplateNaoSuportado, rotuloCampo } from '@/lib/whatsapp-oficial/template-campos'
 import type { TemplatePreviewResposta, WhatsAppMessage, WhatsAppTemplate } from '@/types/whatsapp-oficial'
 
-export function InboxTemplateDialog({ conversationId, canalId, contactName, onClose, onSent, onSophiaPaused }: {
+export function InboxTemplateDialog({ conversationId, canalId, contactName, blockedReason, onClose, onSent, onSophiaPaused }: {
   conversationId: string; canalId: string; contactName: string; onClose: () => void
+  blockedReason?: string
   onSent: (message: WhatsAppMessage) => void; onSophiaPaused: (inFlight: number) => void
 }) {
   const [templates, setTemplates] = useState<WhatsAppTemplate[]>([])
@@ -45,7 +46,7 @@ export function InboxTemplateDialog({ conversationId, canalId, contactName, onCl
   const currentPreview = preview?.key === key ? preview.data : null
   const unsupported = template ? motivoTemplateNaoSuportado(template) : null
   const complete = !!template && !unsupported && camposFaltando(fields,values).length === 0
-  const canSend = complete && currentPreview?.validacao.ok && currentPreview.statusAprovacao === 'aprovado' && !busy && !uncertain
+  const canSend = complete && currentPreview?.validacao.ok && currentPreview.statusAprovacao === 'aprovado' && !busy && !uncertain && !blockedReason
 
   async function review() {
     if (!template || !complete) return
@@ -93,7 +94,7 @@ export function InboxTemplateDialog({ conversationId, canalId, contactName, onCl
     <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
       <DialogHeader><DialogTitle>Enviar template aprovado</DialogTitle>
         <DialogDescription>Para {contactName}, nesta conversa. Confira o conteúdo antes de colocar na fila; o envio não reabre a janela de resposta livre.</DialogDescription></DialogHeader>
-      <fieldset disabled={busy || uncertain} className="min-w-0 space-y-4">
+      <fieldset disabled={busy || uncertain || !!blockedReason} className="min-w-0 space-y-4">
         <div className="space-y-1.5"><Label htmlFor="inbox-template">Template deste número</Label>
           <select id="inbox-template" className="border-input bg-background w-full rounded-md border px-3 py-2 text-sm" value={templateId} disabled={loading}
             onChange={event => { previewAbort.current?.abort(); setBusyPreview(false); setTemplateId(event.target.value); setValues({}); setPreview(null); setError(null) }}>
@@ -117,6 +118,7 @@ export function InboxTemplateDialog({ conversationId, canalId, contactName, onCl
           {fields.filter(field => field.onde === 'midia' || field.onde === 'botao').map(field => <p key={field.chave} className="mt-2 text-xs">{rotuloCampo(field)}: {values[field.chave] || 'Exemplo aprovado'}</p>)}
         </div>}
       </fieldset>
+      {blockedReason && <p role="alert" className="text-destructive text-sm">{blockedReason}</p>}
       {error && <p role="alert" className="text-destructive text-sm">{error}</p>}
       <DialogFooter><Button variant="ghost" disabled={busy} onClick={onClose}>Fechar</Button>
         <Button disabled={!canSend} onClick={() => void send()}>{busy ? 'Colocando na fila…' : 'Enviar nesta conversa'}</Button></DialogFooter>
