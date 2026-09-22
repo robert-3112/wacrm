@@ -111,9 +111,18 @@ export function NumerosClient({ canais, podeGerir, evolutionDisponivel }: {
   }
 
   return <div className="space-y-4">
-    <Alert><ShieldCheck /><AlertTitle>Um telefone do CRM ainda não é um canal conectado</AlertTitle>
-      <AlertDescription>Cada número de corretor precisa de autorização do titular e conexão própria. Nenhum telefone é conectado automaticamente. Cadastrar e testar também não liga os envios.</AlertDescription>
+    <Alert><ShieldCheck /><AlertTitle>Escolha a conexão adequada para cada número</AlertTitle>
+      <AlertDescription>Para campanhas oficiais, use a API da Meta. Para manter também o WhatsApp Business no celular do corretor, a conexão precisa ser pelo Coexistence oficial.</AlertDescription>
     </Alert>
+    <details className="border-border rounded-xl border px-4 py-3 text-sm">
+      <summary className="cursor-pointer font-medium focus-visible:outline-2 focus-visible:outline-offset-4">Entenda as opções de conexão</summary>
+      <dl className="mt-3 space-y-3 text-xs">
+        <div><dt className="font-medium">API oficial da Meta</dt><dd className="text-muted-foreground mt-1">Envios e recebimentos pelo sistema. O cadastro abaixo vincula uma conexão já configurada na Meta.</dd></div>
+        <div><dt className="font-medium">Coexistence · Business no celular + API oficial</dt><dd className="text-muted-foreground mt-1">Depende da elegibilidade do número, cadastro incorporado da Meta e confirmação do titular no aplicativo. A vinculação guiada ainda não está disponível neste painel; adicionar credenciais não conclui esse processo.</dd></div>
+        <div><dt className="font-medium">Evolution · conexão independente</dt><dd className="text-muted-foreground mt-1">Uma sessão vinculada por QR Code não se torna oficial. Essa conexão não substitui o Coexistence para campanhas pela API da Meta.</dd></div>
+      </dl>
+      <p className="text-muted-foreground mt-3 text-xs">Cadastrar ou testar uma conexão não ativa disparos nem a Sophia. Campanhas continuam sujeitas a consentimento, templates, descadastro e limites.</p>
+    </details>
     <div className="flex items-center justify-between gap-3">
       <p className="text-muted-foreground text-sm">{canais.length === 1 ? '1 número visível' : `${canais.length} números visíveis`}</p>
       {podeGerir && <Button onClick={() => { setError(null); setCreateOpen(true) }}><Plus aria-hidden="true" /> Adicionar número</Button>}
