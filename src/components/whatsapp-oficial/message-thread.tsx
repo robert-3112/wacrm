@@ -178,7 +178,7 @@ export function MessageThread({
         {sendWindow.window?.applies && <Button variant="outline" size="sm" disabled={isClosed || isOptedOut} onClick={() => setTemplateConversationId(conversation.id)}>Usar template aprovado</Button>}
       </div>
       {templateConversationId === conversation.id && <InboxTemplateDialog
-        key={conversation.id} conversationId={conversation.id} canalId={conversation.canal_id} contactName={name}
+        key={`template-${conversation.id}`} conversationId={conversation.id} canalId={conversation.canal_id} contactName={name}
         blockedReason={isOptedOut ? "Este contato pediu para não receber mensagens." : isClosed ? "Conversa encerrada. Reabra antes de enviar." : undefined}
         onClose={() => setTemplateConversationId(null)} onSent={onMessageSent}
         onSophiaPaused={(inFlightReplies) => { handleSophiaPaused(inFlightReplies); setSophiaRefresh(value => value + 1) }}
