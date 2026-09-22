@@ -479,6 +479,30 @@ describe('processOutboxBatch — live failure', () => {
 })
 
 describe('processOutboxBatch — permanent business blocks (dead-letter, no network)', () => {
+  it.each([
+    ['shadow', true, 'meta_cloud'],
+    ['shadow', true, 'evolution'],
+    ['live', false, 'meta_cloud'],
+    ['live', false, 'evolution'],
+  ] as const)('preserves the message in mode=%s sendEnabled=%s provider=%s', async (mode, sendEnabled, provider) => {
+    vi.mocked(isSendEnabledFor).mockReturnValue(sendEnabled)
+    const pendingMessage = { status: 'pendente', wamid: null }
+    const { admin, messages, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob({ provider, conversa_status: 'encerrada' })] },
+      messages: { 'msg-1': pendingMessage },
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode }), workerId: 'w1' })
+
+    expect(result.blocked).toBe(1)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto', last_error_code: 'conversa_encerrada' })
+    expect(messages['msg-1']).toEqual({ status: 'pendente', wamid: null })
+    expect(messageUpdates(calls)).toHaveLength(0)
+    expect(adapterMock.send).not.toHaveBeenCalled()
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   const permanentBlockCases: Array<[string, Partial<OutboxJob>, boolean]> = [
     ['conversa_optout', { conversa_optout_em: '2026-07-01T00:00:00Z' }, false],
     ['lead_inativo', { lead_status_saida: 'inativo' }, false],

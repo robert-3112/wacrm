@@ -224,6 +224,7 @@ function detectPermanentBlock(job: OutboxJob, adapter: OutboundAdapter, now: Dat
 
 async function deadLetterBlock(
   admin: SupabaseClient,
+  flags: WhatsappFlags,
   job: OutboxJob,
   workerId: string,
   motivo: string,
@@ -236,7 +237,9 @@ async function deadLetterBlock(
     last_error_message: motivo,
     updated_at: now.toISOString(),
   })
-  // Only a confirmed closure can fail the same valid outbound message.
+  // Shadow/provider-off closures leave messages untouched, even for a block.
+  if (flags.mode !== 'live' || !isSendEnabledFor(job.provider, flags)) return
+  // Only a confirmed live closure can fail the same valid outbound message.
   // The guarded write also preserves any receipt arriving after this read.
   if (job.message_id && (await readLinkedMessageState(admin, job)) === 'pending') {
     await updateMessage(admin, job, {
@@ -397,7 +400,7 @@ async function handleJob(
   // a) permanent business block.
   const blockReason = detectPermanentBlock(job, adapter, now)
   if (blockReason) {
-    await deadLetterBlock(admin, job, workerId, blockReason, now)
+    await deadLetterBlock(admin, flags, job, workerId, blockReason, now)
     await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: blockReason })
     return {
       outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: blockReason },
@@ -409,7 +412,7 @@ async function handleJob(
   if (job.message_id) {
     const messageState = await readLinkedMessageState(admin, job)
     if (messageState === 'invalid') {
-      await deadLetterBlock(admin, job, workerId, 'mensagem_vinculo_invalido', now)
+      await deadLetterBlock(admin, flags, job, workerId, 'mensagem_vinculo_invalido', now)
       await registrarAuditoria(admin, {
         job, flags, workerId, decisao: 'bloqueado', motivo: 'mensagem_vinculo_invalido',
       })
@@ -507,7 +510,7 @@ async function handleJob(
     // transient: rethrow so the outer handler can requeue before provider contact.
     if (!(err instanceof ChannelCredentialMissingError)) throw err
     console.error('[whatsapp-outbox-worker] channel has no stored credential', job.canal_id)
-    await deadLetterBlock(admin, job, workerId, 'credencial_ausente', now)
+    await deadLetterBlock(admin, flags, job, workerId, 'credencial_ausente', now)
     await registrarAuditoria(admin, {
       job,
       flags,
