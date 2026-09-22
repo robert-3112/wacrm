@@ -151,9 +151,8 @@ function LinhaTrava({
  * Outro ambiente pode consumir os mesmos itens com envio real habilitado.
  * Enfileirar não comprova envio nem assegura simulação.
  *
- * `compacto` é para a tela de detalhe, onde o painel divide espaço com a
- * decisão de aprovar: lá vale o aviso curto, com o detalhamento só na lista de
- * travas.
+ * O resumo orienta a operacao; detalhes ficam recolhidos para nao competir
+ * com o publico, a mensagem e o agendamento da campanha.
  */
 export function TravasSaidaPainel({
   travas,
@@ -174,40 +173,60 @@ export function TravasSaidaPainel({
       {shadow ? <ShieldCheck /> : <ShieldOff />}
       <AlertTitle>
         {shadow
-          ? "Este ambiente está configurado para simulação"
-          : "Modo live — mensagens podem sair para números reais"}
+          ? "Envios em simulação neste ambiente"
+          : travas.broadcastBancoLigado === null
+            ? "Liberação de campanhas não verificada"
+            : !broadcastLiberado
+            ? "Campanhas pausadas neste ambiente"
+            : !travas.envioMetaLigado && !travas.envioEvolutionLigado
+              ? "Envio de mensagens desligado"
+              : travas.pilotoLigado
+                ? "Campanhas em piloto restrito"
+                : "Campanhas liberadas para processamento"}
       </AlertTitle>
       <AlertDescription>
         <p>
           {shadow
-            ? "O processamento neste ambiente não envia mensagens ao WhatsApp. Porém, a fila pode ser compartilhada com outro ambiente que faz envios reais. Confirme com a gestão antes de enfileirar mensagens ou aprovar campanhas."
-            : "O modo de saída está em live. Confira as travas abaixo antes de aprovar qualquer campanha."}
+            ? "Este ambiente simula o processamento. A fila é compartilhada: confirme as condições de envio antes de aprovar."
+            : travas.broadcastBancoLigado === null
+              ? "Não foi possível consultar a liberação da gestão. Atualize a página antes de aprovar uma campanha."
+              : !broadcastLiberado
+              ? "Prepare o público, confira a mensagem e agende. A execução depende da liberação dos dois controles de campanha."
+              : !travas.envioMetaLigado && !travas.envioEvolutionLigado
+                ? "Nenhuma conexão está habilitada para enviar neste ambiente. Você pode preparar campanhas enquanto a gestão conclui a configuração."
+              : travas.pilotoLigado
+                ? "Somente os destinatários autorizados para o piloto podem receber. Confira o público e a prévia antes de aprovar."
+                : "Campanhas aprovadas podem enviar mensagens. Confira público, consentimento e agendamento antes de aprovar."}
         </p>
+        <details className="mt-3">
+          <summary className="cursor-pointer rounded-sm text-xs font-medium text-foreground focus-visible:outline-2 focus-visible:outline-offset-4">
+            Ver condições de envio
+          </summary>
         <ul className="mt-3 space-y-1.5 text-xs">
           <LinhaTrava
-            rotulo="Kill switch de broadcast (banco)"
+            rotulo="Liberação de campanhas na gestão"
             ligada={travas.broadcastBancoLigado}
-            detalhe="crm_config.whatsapp_broadcast_enabled, editável pela gestão do CRM."
+            detalhe="Permissão geral de processamento, controlada pela gestão."
           />
           <LinhaTrava
-            rotulo="Kill switch de broadcast (worker)"
+            rotulo="Liberação de campanhas no processador"
             ligada={travas.broadcastEnvLigado}
-            detalhe="Trava de ambiente do worker da outbox, conferida a cada item de campanha."
+            detalhe="Verificada novamente antes de cada envio."
           />
           <LinhaTrava
-            rotulo="Envio real — Meta Cloud"
+            rotulo="API oficial da Meta"
             ligada={travas.envioMetaLigado}
-            detalhe="Combina o modo de saída com a trava do provider."
+            detalhe="Disponibilidade do envio oficial neste ambiente."
           />
           <LinhaTrava
-            rotulo="Envio real — Evolution"
+            rotulo="Conexão Evolution"
             ligada={travas.envioEvolutionLigado}
-            detalhe="Combina o modo de saída com a trava do provider."
+            detalhe="Conexão independente; não equivale à API oficial da Meta."
           />
           <LinhaTrava
             rotulo="Modo piloto"
             ligada={travas.pilotoLigado}
-            detalhe="Quando ligado, só números da allowlist podem receber envio real."
+            detalhe="Quando ligado, limita o envio aos destinatários autorizados do teste."
           />
         </ul>
         {!broadcastLiberado && (
@@ -220,6 +239,7 @@ export function TravasSaidaPainel({
             </span>
           </p>
         )}
+        </details>
       </AlertDescription>
     </Alert>
   );
