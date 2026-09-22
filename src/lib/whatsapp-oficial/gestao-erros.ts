@@ -30,6 +30,8 @@ import type { CampanhaStatus, TemplateStatusAprovacao } from '@/types/whatsapp-o
  * daí `Unauthorized`/`Forbidden`/`Not found` estarem nesta mesma tabela).
  */
 const MENSAGENS: Record<string, string> = {
+  fora_da_janela_24h: 'A janela de 24 horas terminou. Use um template aprovado ou aguarde uma nova mensagem do contato.',
+  destinatario_fora_allowlist: 'Este destinatário ainda não está autorizado no piloto.',
   // -- api-auth / toErrorResponse -------------------------------------------
   Unauthorized: 'Sessão expirada. Entre novamente para continuar.',
   Forbidden: 'Seu usuário não tem papel de gestão para executar esta ação.',
@@ -292,7 +294,11 @@ export function rotuloStatusCampanha(status: string): string {
 const STATUS_DESTINATARIO: Record<string, string> = {
   pendente: 'Pendente',
   enfileirado: 'Enfileirado',
-  enviado: 'Enfileirado no provedor',
+  enviado: 'Enviado ao provedor',
+  processando: 'Processando',
+  aguardando_retry: 'Aguardando nova tentativa',
+  simulado: 'Simulado, sem envio',
+  inconsistente: 'Inconsistente — revisar',
   entregue: 'Entregue',
   lido: 'Lido',
   falhou: 'Falhou',

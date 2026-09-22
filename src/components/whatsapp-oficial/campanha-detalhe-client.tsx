@@ -13,8 +13,7 @@
  *     só ele manda `dryRun: false`. A rota já tem o default seguro (qualquer
  *     coisa que não seja literalmente `false` vira dry-run); a tela não pode
  *     ser o lugar onde essa proteção é contornada por conveniência.
- *  2. **Nunca escrever "enviado".** No modo shadow o worker marca o item como
- *     simulado e não chama provider nenhum. "Enfileirado" é a palavra honesta.
+ *  2. Simulados não contam como envio; entrega exige evidência do provedor.
  *  3. **Quatro olhos explicado, não vazado.** `aprovador_igual_criador` vira
  *     um bloco que explica a regra, não um toast com o slug cru.
  */
@@ -62,7 +61,6 @@ import {
 import {
   descricaoMotivoSupressao,
   rotuloStatusCampanha,
-  rotuloStatusDestinatario,
 } from "@/lib/whatsapp-oficial/gestao-erros";
 import {
   podeAprovar,
@@ -74,6 +72,8 @@ import {
   resumirSupressoes,
   type PublicoResolvido,
 } from "@/lib/whatsapp-oficial/campanha-resumo";
+import { CampanhaContadores, AtualizarCampanhas } from './campanha-contadores';
+import { dataCampanha } from '@/lib/whatsapp-oficial/campanha-evidencia';
 import { badgeStatusCampanha, TravasSaidaPainel } from "./gestao-shell";
 import type {
   CampanhaDetalhe,
@@ -101,6 +101,7 @@ export function CampanhaDetalheClient({
   // catálogo). Vem `null` quando a campanha não tem template.
   const [exigencias, setExigencias] = useState<CampanhaExigenciasTemplate | null>(null);
   const [carregando, setCarregando] = useState(true);
+  const [atualizando, setAtualizando] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
 
   const [simulando, setSimulando] = useState(false);
@@ -128,7 +129,9 @@ export function CampanhaDetalheClient({
   // é pior que ver o número atualizar no lugar. De quebra, nenhum setState
   // roda de forma síncrona dentro do efeito abaixo.
   const carregar = useCallback(async () => {
+    setAtualizando(true);
     const r = await obterCampanha(campanhaId);
+    setAtualizando(false);
     setCarregando(false);
     if (!r.ok) {
       setErro(r.mensagem);
@@ -254,6 +257,7 @@ export function CampanhaDetalheClient({
           <AlertTitle>Não foi possível abrir a campanha</AlertTitle>
           <AlertDescription>{erro ?? "Campanha não encontrada."}</AlertDescription>
         </Alert>
+        <AtualizarCampanhas carregando={atualizando} onAtualizar={() => void carregar()} />
         <VoltarParaLista />
       </div>
     );
@@ -295,12 +299,15 @@ export function CampanhaDetalheClient({
         {campanha.provider && <Badge variant="outline">{campanha.provider}</Badge>}
       </div>
 
+      <div className="space-y-3 rounded-lg border border-border p-4">
+        <AtualizarCampanhas carregando={atualizando} onAtualizar={() => void carregar()} />
+        <CampanhaContadores resumo={campanha.resumo} detalhado />
+      </div>
       <TravasSaidaPainel travas={travas} />
 
       <PainelPublico
         publico={publico}
         campanha={campanha}
-        destinatarios={destinatarios}
         ultimaSimulacao={ultimaSimulacao}
         ultimaSimulacaoEm={ultimaSimulacaoEm}
         gerarLiberado={gerarLiberado}
@@ -543,7 +550,6 @@ function ErroDeAcao({ erro }: { erro: { slug: string; mensagem: string } }) {
 function PainelPublico({
   publico,
   campanha,
-  destinatarios,
   ultimaSimulacao,
   ultimaSimulacaoEm,
   gerarLiberado,
@@ -558,7 +564,6 @@ function PainelPublico({
 }: {
   publico: PublicoResolvido;
   campanha: CampanhaDetalhe;
-  destinatarios: DestinatariosAgregado | null;
   ultimaSimulacao: GerarDestinatariosResultado | null;
   ultimaSimulacaoEm: string | null;
   gerarLiberado: boolean;
@@ -700,21 +705,6 @@ function PainelPublico({
               <TabelaSupressao supressoes={supressoes} />
             ) : (
               <p className="text-sm text-muted-foreground">Ninguém foi suprimido neste cálculo.</p>
-            )}
-
-            {destinatarios && Object.keys(destinatarios.por_status).length > 0 && (
-              <div className="space-y-1.5">
-                <h3 className="text-xs tracking-wide text-muted-foreground uppercase">
-                  Destinatários gravados por situação
-                </h3>
-                <div className="flex flex-wrap gap-1.5">
-                  {Object.entries(destinatarios.por_status).map(([st, qtd]) => (
-                    <Badge key={st} variant="outline">
-                      {rotuloStatusDestinatario(st)}: {qtd}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
             )}
           </div>
         )}
@@ -883,6 +873,7 @@ function FichaTecnica({
           rotulo="Mensagem livre"
           valor={campanha.mensagem_livre ? "definida" : null}
         />
+        <Campo rotulo="Agendada para" valor={campanha.agendado_para ? dataCampanha(campanha.agendado_para) : "Sem agendamento"} />
         <Campo rotulo="Criada em" valor={dataCurta(campanha.created_at)} />
         <Campo rotulo="Aprovada em" valor={campanha.aprovado_em ? dataCurta(campanha.aprovado_em) : null} />
         <Campo

@@ -295,6 +295,7 @@ export interface CampanhaResumo {
   cancelado_em: string | null
   destinatarios_gerados_em: string | null
   dry_run_em: string | null
+  resumo: CampanhaEvidencia
   total_destinatarios: number | null
   total_suprimidos: number | null
   total_enviados: number | null
@@ -338,13 +339,19 @@ export interface CampanhaDetalhe extends CampanhaResumo {
   ultimo_envio_em: string | null
 }
 
-/** Agregado que a rota de detalhe calcula em JS sobre
- *  `whatsapp_broadcast_recipients` (só existe depois de materializar). */
+/** Agregado de destinatários materializados. */
 export interface DestinatariosAgregado {
   total: number
   truncado: boolean
   por_status: Record<string, number>
   por_motivo_supressao: Record<string, number>
+}
+
+/** Evidência atual reconciliada pela RPC, sem inferir entrega do enfileiramento. */
+export interface CampanhaEvidencia extends DestinatariosAgregado {
+  broadcast_id: string
+  calculado_em: string
+  enfileirados: number
 }
 
 /**
