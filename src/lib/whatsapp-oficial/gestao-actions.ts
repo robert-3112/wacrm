@@ -340,7 +340,7 @@ export function montarConfigCampanha(form: FormularioCampanha): Record<string, u
     if (!form.confirmarSegmento) throw new Error('Confirme o escopo do segmento do CRM.')
     seg.modo = 'segmento'
     seg.confirmado = true
-  } else if (form.modoPublico === 'selecionados' || form.segmentacao?.leadIds !== undefined) {
+  } else {
     const ids = [...new Set((form.segmentacao?.leadIds ?? []).map((id) => id.trim()).filter(Boolean))]
     if (ids.length === 0) throw new Error('Selecione ao menos um contato do CRM.')
     seg.modo = 'selecionados'

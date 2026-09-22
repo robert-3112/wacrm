@@ -254,7 +254,7 @@ describe('POST /api/whatsapp-oficial/campanhas', () => {
     nome: 'Reativação bolsão',
     templateId: TEMPLATE_ID,
     config: {
-      segmentacao: { etapas: ['novo'], sem_corretor: true },
+      segmentacao: { modo: 'segmento', confirmado: true, etapas: ['novo'], sem_corretor: true },
       politica_consentimento: 'exigir_base_legal',
       bases_legais: ['fb_lead_form'],
       cadencia_segundos: 30,

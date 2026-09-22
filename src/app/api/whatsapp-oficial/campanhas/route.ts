@@ -193,22 +193,20 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     // Seleção explícita nunca pode virar público irrestrito por omissão de IDs.
-    if (config.segmentacao !== undefined) {
-      if (!config.segmentacao || typeof config.segmentacao !== 'object' || Array.isArray(config.segmentacao)) {
-        return unprocessable('segmentacao_invalida')
-      }
-      const seg = config.segmentacao as Record<string, unknown>
-      if (seg.modo !== undefined && seg.modo !== 'selecionados' && seg.modo !== 'segmento') {
-        return unprocessable('segmentacao_invalida')
-      }
-      if (seg.modo === 'segmento' && (seg.confirmado !== true || 'lead_ids' in seg)) {
-        return unprocessable('segmentacao_invalida')
-      }
-      if (seg.modo === 'selecionados' || 'lead_ids' in seg) {
-        if (!Array.isArray(seg.lead_ids) || seg.lead_ids.length === 0 || seg.lead_ids.length > 500 ||
-          seg.lead_ids.some((id) => typeof id !== 'string' || !UUID_RE.test(id))) {
-          return unprocessable('lead_ids_invalidos')
-        }
+    if (!config.segmentacao || typeof config.segmentacao !== 'object' || Array.isArray(config.segmentacao)) {
+      return unprocessable('segmentacao_invalida')
+    }
+    const seg = config.segmentacao as Record<string, unknown>
+    if (seg.modo !== 'selecionados' && seg.modo !== 'segmento') {
+      return unprocessable('segmentacao_invalida')
+    }
+    if (seg.modo === 'segmento' && (seg.confirmado !== true || 'lead_ids' in seg)) {
+      return unprocessable('segmentacao_invalida')
+    }
+    if (seg.modo === 'selecionados') {
+      if (!Array.isArray(seg.lead_ids) || seg.lead_ids.length === 0 || seg.lead_ids.length > 500 ||
+        seg.lead_ids.some((id) => typeof id !== 'string' || !UUID_RE.test(id))) {
+        return unprocessable('lead_ids_invalidos')
       }
     }
     const agendado = config.agendado_para

@@ -15,6 +15,14 @@ async function create(config: unknown) {
   return POST(new Request('http://localhost/api/whatsapp-oficial/campanhas', { method: 'POST',
     body: JSON.stringify({ canalId: id, nome: 'Rascunho', config }) }))
 }
+it.each([undefined, null, {}, { segmentacao: {} }, { segmentacao: { etapas: ['novo'] } },
+  { segmentacao: { lead_ids: [id] } }, { segmentacao: { modo: 'desconhecido', confirmado: true } }])
+  ('recusa criação sem escolha explícita de público: %j', async (config) => {
+    const response = await create(config)
+    expect(response.status).toBe(422)
+    expect(await response.json()).toEqual({ error: 'segmentacao_invalida' })
+    expect(rpc).not.toHaveBeenCalled()
+  })
 it.each([{ modo: 'selecionados' }, { modo: 'selecionados', lead_ids: [] }, { lead_ids: [] },
   { lead_ids: ['invalid'] }, { lead_ids: null }, { lead_ids: 'id' }])
   ('recusa público explícito vazio ou inválido: %j', async (segmentacao) => {
@@ -23,7 +31,9 @@ it.each([{ modo: 'selecionados' }, { modo: 'selecionados', lead_ids: [] }, { lea
   })
 it.each(['2020-01-01T12:00:00Z', '2099-01-01T12:00', '2099-02-31T12:00:00Z', 'invalid', 123])
   ('recusa agendamento passado, sem fuso ou inválido: %s', async (agendado_para) => {
-    expect((await create({ agendado_para })).status).toBe(422)
+    const response = await create({ agendado_para, segmentacao: { modo: 'selecionados', lead_ids: [id] } })
+    expect(response.status).toBe(422)
+    expect(await response.json()).toEqual({ error: 'agendamento_invalido' })
     expect(rpc).not.toHaveBeenCalled()
   })
 it('preserva seleção explícita, filtros e agendamento UTC para RPC', async () => {
