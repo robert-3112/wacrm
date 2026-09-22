@@ -71,6 +71,8 @@ function makeAdmin(
     failSelectForTables?: Set<string>
     failUpdateForIds?: Set<string>
     lostClaimForIds?: Set<string>
+    unconfirmedUpdateForIds?: Set<string>
+    beforeMessageUpdate?: () => void
   } = {},
 ) {
   const calls: MockCall[] = []
@@ -96,8 +98,8 @@ function makeAdmin(
             filters[column] = values
             return query
           },
-          then<TResult1 = { error: null; count: number }, TResult2 = never>(
-            onfulfilled?: ((value: { error: null; count: number }) => TResult1 | PromiseLike<TResult1>) | null,
+          then<TResult1 = { error: null; count: number | null }, TResult2 = never>(
+            onfulfilled?: ((value: { error: null; count: number | null }) => TResult1 | PromiseLike<TResult1>) | null,
             onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
           ) {
             calls.push({ table, op: 'update', values, filters: { ...filters } })
@@ -105,15 +107,17 @@ function makeAdmin(
             if (opts.failUpdateForIds?.has(id)) {
               return Promise.reject(new Error(`simulated update failure for ${id}`)).then(onfulfilled, onrejected)
             }
+            if (table === 'whatsapp_messages') opts.beforeMessageUpdate?.()
             const allowedStatuses = filters.status as string[] | undefined
             const currentStatus = messages[id]?.status ?? 'pendente'
             const currentTenant = messages[id]?.tenant_id ?? 't-1'
             const currentConversation = messages[id]?.conversation_id ?? 'conv-1'
-            const count = opts.lostClaimForIds?.has(id) ||
+            const count = opts.unconfirmedUpdateForIds?.has(id) ? null : opts.lostClaimForIds?.has(id) ||
               (table === 'whatsapp_messages' && (
                 (allowedStatuses && !allowedStatuses.includes(currentStatus)) ||
                 (filters.tenant_id && filters.tenant_id !== currentTenant) ||
-                (filters.conversation_id && filters.conversation_id !== currentConversation)
+                (filters.conversation_id && filters.conversation_id !== currentConversation) ||
+                (filters.direction && filters.direction !== (messages[id]?.direction ?? 'outbound'))
               ))
               ? 0 : 1
             if (count && table === 'whatsapp_messages') {
@@ -478,6 +482,8 @@ describe('processOutboxBatch — permanent business blocks (dead-letter, no netw
   const permanentBlockCases: Array<[string, Partial<OutboxJob>, boolean]> = [
     ['conversa_optout', { conversa_optout_em: '2026-07-01T00:00:00Z' }, false],
     ['lead_inativo', { lead_status_saida: 'inativo' }, false],
+    ['conversa_encerrada', { conversa_status: 'encerrada' }, false],
+    ['destinatario_ausente', { lead_whatsapp: null }, false],
     ['fora_da_janela_24h', {}, true],
   ]
 
@@ -488,7 +494,7 @@ describe('processOutboxBatch — permanent business blocks (dead-letter, no netw
         vi.mocked(isInsideFreeFormWindow).mockReturnValue(false)
       }
       const job = makeJob(overrides)
-      const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+      const { admin, calls, messages } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
       const flags = makeFlags({ mode: 'live' })
 
       const result = await processOutboxBatch({ admin, flags, workerId: 'w1' })
@@ -497,10 +503,92 @@ describe('processOutboxBatch — permanent business blocks (dead-letter, no netw
       const outboxUpdate = outboxUpdates(calls)
       expect(outboxUpdate[0].values).toMatchObject({ status: 'morto', last_error_code: motivo })
       expect(auditInserts(calls)[0].values).toMatchObject({ decisao: 'bloqueado', motivo })
+      expect(messages['msg-1']).toMatchObject({ status: 'falhou', erro_code: motivo, erro_detalhe: motivo })
+      expect(messageUpdates(calls)[0].filters).toMatchObject({
+        id: 'msg-1', tenant_id: 't-1', conversation_id: 'conv-1', direction: 'outbound',
+        status: ['pendente', 'falhou'],
+      })
+      expect(calls.indexOf(outboxUpdate[0])).toBeLessThan(calls.indexOf(messageUpdates(calls)[0]))
 
       expect(fetchMock).not.toHaveBeenCalled()
       expect(adapterMock.send).not.toHaveBeenCalled()
       expect(loadChannelCredential).not.toHaveBeenCalled()
+    },
+  )
+
+  it('marks an unconfigured channel failure on the linked message', async () => {
+    vi.mocked(adapterMock.isConfigured).mockReturnValue(false)
+    const { admin, messages } = makeAdmin({ claimResult: { ok: true, claimed: [makeJob()] } })
+
+    await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(messages['msg-1']).toMatchObject({
+      status: 'falhou', erro_code: 'canal_nao_configurado', erro_detalhe: 'canal_nao_configurado',
+    })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it.each(['enviada', 'entregue', 'lida'])('preserves a linked message already %s', async (status) => {
+    const { admin, messages, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob({ conversa_status: 'encerrada' })] },
+      messages: { 'msg-1': { status } },
+    })
+
+    await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(messages['msg-1']).toEqual({ status })
+    expect(messageUpdates(calls)).toHaveLength(0)
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it.each(['enviada', 'entregue', 'lida'])('preserves %s received between validation and failure write', async (status) => {
+    const { admin, messages } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob({ conversa_status: 'encerrada' })] },
+      messages: { 'msg-1': { status: 'pendente' } },
+      beforeMessageUpdate: () => { messages['msg-1'].status = status },
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.blocked).toBe(1)
+    expect(messages['msg-1']).toEqual({ status })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { status: 'pendente', tenant_id: 't-2' },
+    { status: 'pendente', conversation_id: 'conv-2' },
+    { status: 'pendente', direction: 'inbound' },
+  ])('does not mutate an invalid link during a business block: %j', async (message) => {
+    const { admin, messages, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob({ conversa_status: 'encerrada' })] },
+      messages: { 'msg-1': message },
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.blocked).toBe(1)
+    expect(messages['msg-1']).toEqual(message)
+    expect(messageUpdates(calls)).toHaveLength(0)
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it.each(['lostClaimForIds', 'failUpdateForIds', 'unconfirmedUpdateForIds'] as const)(
+    'leaves the message pending when outbox closure is unconfirmed: %s', async (failure) => {
+      const { admin, messages, calls } = makeAdmin({
+        claimResult: { ok: true, claimed: [makeJob({ conversa_status: 'encerrada' })] },
+        messages: { 'msg-1': { status: 'pendente' } },
+        [failure]: new Set(['ob-1']),
+      })
+
+      const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+      expect(result.blocked).toBe(0)
+      expect(result.outcomes[0].decision).toBe('erro_inesperado')
+      expect(messages['msg-1']).toEqual({ status: 'pendente' })
+      expect(messageUpdates(calls)).toHaveLength(0)
+      expect(auditInserts(calls)).toHaveLength(0)
+      expect(adapterMock.send).not.toHaveBeenCalled()
     },
   )
 })
@@ -884,7 +972,7 @@ describe('processOutboxBatch — temporary blocks (requeue, not dead-letter)', (
 describe('processOutboxBatch — missing credential in live mode', () => {
   it('dead-letters with motivo=credencial_ausente and never reaches the adapter', async () => {
     const job = makeJob()
-    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    const { admin, calls, messages } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
     const flags = makeFlags({ mode: 'live' })
     // Only a genuinely absent credential (typed error) is permanent.
     vi.mocked(loadChannelCredential).mockRejectedValue(new ChannelCredentialMissingError())
@@ -895,6 +983,9 @@ describe('processOutboxBatch — missing credential in live mode', () => {
     const outboxUpdate = outboxUpdates(calls)
     expect(outboxUpdate[0].values).toMatchObject({ status: 'morto', last_error_code: 'credencial_ausente' })
     expect(auditInserts(calls)[0].values).toMatchObject({ motivo: 'credencial_ausente' })
+    expect(messages['msg-1']).toMatchObject({
+      status: 'falhou', erro_code: 'credencial_ausente', erro_detalhe: 'credencial_ausente',
+    })
 
     expect(adapterMock.send).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()

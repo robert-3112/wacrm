@@ -155,6 +155,7 @@ async function updateMessage(
     .eq('id', job.message_id)
     .eq('tenant_id', job.tenant_id)
     .eq('conversation_id', job.conversation_id)
+    .eq('direction', 'outbound')
     .in('status', ['pendente', 'falhou'])
   if (error) throw error
   if (count === 1) return
@@ -235,6 +236,15 @@ async function deadLetterBlock(
     last_error_message: motivo,
     updated_at: now.toISOString(),
   })
+  // Only a confirmed closure can fail the same valid outbound message.
+  // The guarded write also preserves any receipt arriving after this read.
+  if (job.message_id && (await readLinkedMessageState(admin, job)) === 'pending') {
+    await updateMessage(admin, job, {
+      status: 'falhou',
+      erro_code: motivo,
+      erro_detalhe: motivo,
+    })
+  }
 }
 
 /**
