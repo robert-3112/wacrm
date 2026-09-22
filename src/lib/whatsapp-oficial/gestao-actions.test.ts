@@ -25,12 +25,44 @@ import {
   montarQueryTemplates,
   montarValoresPreview,
   previewTemplate,
+  serializarAgendamento,
   SLUG_FALHA_DE_REDE,
   type FormularioCampanha,
 } from './gestao-actions'
 
 const CAMPANHA_ID = '11111111-1111-4111-8111-111111111111'
 const CANAL_ID = '22222222-2222-4222-8222-222222222222'
+
+describe('público explícito e agendamento', () => {
+  it('modo segmento exige confirmação e não mantém IDs de uma seleção anterior', () => {
+    expect(() => montarConfigCampanha({ canalId: CANAL_ID, nome: 'Segmento', modoPublico: 'segmento' })).toThrow('Confirme')
+    expect(montarConfigCampanha({ canalId: CANAL_ID, nome: 'Segmento', modoPublico: 'segmento',
+      confirmarSegmento: true, segmentacao: { leadIds: [CAMPANHA_ID], tags: ['teste'] } }).segmentacao)
+      .toEqual({ modo: 'segmento', confirmado: true, tags: ['teste'] })
+  })
+  it('preserva e deduplica IDs, mantendo filtros como restrições adicionais', () => {
+    expect(montarConfigCampanha({ canalId: CANAL_ID, nome: 'Piloto',
+      segmentacao: { leadIds: [CAMPANHA_ID, CAMPANHA_ID], etapas: ['novo'] },
+    }).segmentacao).toEqual({ modo: 'selecionados', lead_ids: [CAMPANHA_ID], etapas: ['novo'] })
+  })
+  it('recusa seleção vazia em vez de omitir o filtro de IDs', () => {
+    expect(() => montarConfigCampanha({ canalId: CANAL_ID, nome: 'Piloto',
+      segmentacao: { leadIds: [] },
+    })).toThrow('Selecione')
+    expect(() => montarConfigCampanha({ canalId: CANAL_ID, nome: 'Piloto', modoPublico: 'selecionados' })).toThrow('Selecione')
+  })
+  it('serializa o datetime-local como o instante UTC correspondente', () => {
+    const local = '2099-10-20T14:35'
+    expect(serializarAgendamento(local, 0)).toBe(new Date(2099, 9, 20, 14, 35).toISOString())
+    expect(montarConfigCampanha({ canalId: CANAL_ID, nome: 'Agendada', agendadoPara: local })
+      .agendado_para).toBe(new Date(2099, 9, 20, 14, 35).toISOString())
+  })
+  it.each(['2025-01-01T12:00', '2099-02-31T12:00', 'inválido', '2099-01-01T24:00'])
+    ('recusa horário passado ou data inválida: %s', (valor) => {
+      expect(() => serializarAgendamento(valor, new Date('2026-01-01').getTime())).toThrow()
+    })
+  it('omite agendamento vazio', () => expect(serializarAgendamento('')).toBeUndefined())
+})
 
 function mockFetch(resposta: { status?: number; body?: unknown }) {
   const fn = vi.fn().mockResolvedValue({

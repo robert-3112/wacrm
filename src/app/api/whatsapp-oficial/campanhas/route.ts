@@ -192,6 +192,37 @@ export async function POST(request: Request): Promise<Response> {
       config = body.config as Record<string, unknown>
     }
 
+    // Seleção explícita nunca pode virar público irrestrito por omissão de IDs.
+    if (config.segmentacao !== undefined) {
+      if (!config.segmentacao || typeof config.segmentacao !== 'object' || Array.isArray(config.segmentacao)) {
+        return unprocessable('segmentacao_invalida')
+      }
+      const seg = config.segmentacao as Record<string, unknown>
+      if (seg.modo !== undefined && seg.modo !== 'selecionados' && seg.modo !== 'segmento') {
+        return unprocessable('segmentacao_invalida')
+      }
+      if (seg.modo === 'segmento' && (seg.confirmado !== true || 'lead_ids' in seg)) {
+        return unprocessable('segmentacao_invalida')
+      }
+      if (seg.modo === 'selecionados' || 'lead_ids' in seg) {
+        if (!Array.isArray(seg.lead_ids) || seg.lead_ids.length === 0 || seg.lead_ids.length > 500 ||
+          seg.lead_ids.some((id) => typeof id !== 'string' || !UUID_RE.test(id))) {
+          return unprocessable('lead_ids_invalidos')
+        }
+      }
+    }
+    const agendado = config.agendado_para
+    if (agendado !== undefined && agendado !== null) {
+      // O navegador serializa seu datetime-local como UTC. Recusar datas
+      // normalizadas por Date evita que 31/02 vire silenciosamente março.
+      const data = typeof agendado === 'string' ? new Date(agendado) : null
+      if (typeof agendado !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(agendado) ||
+        !data || !Number.isFinite(data.getTime()) || data.getTime() <= Date.now() ||
+        data.toISOString() !== (agendado.includes('.') ? agendado : agendado.replace('Z', '.000Z'))) {
+        return unprocessable('agendamento_invalido')
+      }
+    }
+
     const basesLegais = config.bases_legais
     if (basesLegais !== undefined && basesLegais !== null) {
       if (!Array.isArray(basesLegais) || basesLegais.some((b) => typeof b !== 'string' || !b.trim())) {
