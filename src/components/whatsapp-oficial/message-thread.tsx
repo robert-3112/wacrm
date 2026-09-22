@@ -38,6 +38,8 @@ import { registerHandoff, registerOptout, sophiaInFlightNotice, updateConversati
 import { MessageBubble } from "./message-bubble";
 import { MessageComposer } from "./message-composer";
 import { SophiaToggle } from "./sophia-toggle";
+import { useConversationWindow } from "./use-conversation-window";
+import { InboxTemplateDialog } from "./inbox-template-dialog";
 import type {
   WhatsAppConversation,
   WhatsAppConversationStatus,
@@ -82,6 +84,9 @@ export function MessageThread({
   // Sophia notice is tied to the conversation it was raised in.
   const [sophiaNotice, setSophiaNotice] = useState<{ conversationId: string; text: string } | null>(null);
   const [sophiaRefresh, setSophiaRefresh] = useState(0);
+  const [templateConversationId, setTemplateConversationId] = useState<string | null>(null);
+  const latestInboundId = messages.filter((message) => message.direction === "inbound").at(-1)?.id;
+  const sendWindow = useConversationWindow(conversation?.id, latestInboundId);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -108,12 +113,18 @@ export function MessageThread({
   const isClosed = conversation.status === "encerrada";
   const isOptedOut = Boolean(conversation.optout_em);
 
-  const composerDisabled = isClosed || isOptedOut;
+  const composerDisabled = isClosed || isOptedOut || !sendWindow.window?.open;
   const composerDisabledReason = isOptedOut
     ? "Este contato optou por não receber mensagens (opt-out) — envio bloqueado."
     : isClosed
       ? "Conversa encerrada — reabra para responder."
-      : undefined;
+      : sendWindow.error
+        ? sendWindow.error
+        : !sendWindow.window
+          ? "Verificando a janela de atendimento…"
+          : !sendWindow.window.open
+            ? "A janela de 24 horas terminou. Use um template aprovado ou aguarde uma nova mensagem do contato."
+            : undefined;
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-background">
@@ -155,6 +166,22 @@ export function MessageThread({
         </div>
       )}
 
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2 text-xs">
+        <p className="text-muted-foreground" role="status">
+          {sendWindow.error ? sendWindow.error : !sendWindow.window ? "Verificando janela…"
+            : !sendWindow.window.applies ? "Conexão independente da API oficial da Meta"
+              : sendWindow.window.open && sendWindow.window.expiresAt
+                ? `Resposta livre até ${new Date(sendWindow.window.expiresAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}.`
+                : "Fora da janela de 24 horas · template aprovado necessário"}
+        </p>
+        {sendWindow.error && <Button variant="ghost" size="sm" onClick={sendWindow.refresh}>Verificar novamente</Button>}
+        {sendWindow.window?.applies && <Button variant="outline" size="sm" disabled={isClosed || isOptedOut} onClick={() => setTemplateConversationId(conversation.id)}>Usar template aprovado</Button>}
+      </div>
+      {templateConversationId === conversation.id && <InboxTemplateDialog
+        key={conversation.id} conversationId={conversation.id} canalId={conversation.canal_id} contactName={name}
+        onClose={() => setTemplateConversationId(null)} onSent={onMessageSent}
+        onSophiaPaused={(inFlightReplies) => { handleSophiaPaused(inFlightReplies); setSophiaRefresh(value => value + 1) }}
+      />}
       <MessageComposer
         key={conversation.id}
         conversationId={conversation.id}
