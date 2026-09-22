@@ -1,11 +1,17 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { CampanhaEvidencia } from '@/types/whatsapp-oficial'
+import type { CampanhaEvidencia, DestinatariosAgregado } from '@/types/whatsapp-oficial'
+
+/** Cada recipient tem um único motivo. A RPC pode classificá-lo como cancelado
+ * (ou inconsistente) sem perder esse motivo; não somar novamente os estados. */
+export function contarSupressoes(resumo: Pick<DestinatariosAgregado, 'por_motivo_supressao'>) {
+  return Object.values(resumo.por_motivo_supressao).reduce((total, n) => total + n, 0)
+}
 
 export function contadoresCampanha(resumo: CampanhaEvidencia) {
   const s = resumo.por_status
   return {
     total_destinatarios: resumo.total,
-    total_suprimidos: s.suprimido ?? 0,
+    total_suprimidos: contarSupressoes(resumo),
     total_enviados: (s.enviado ?? 0) + (s.entregue ?? 0) + (s.lido ?? 0),
     total_entregues: (s.entregue ?? 0) + (s.lido ?? 0),
     total_lidos: s.lido ?? 0,
@@ -41,6 +47,7 @@ export async function carregarResumoCampanhas<T extends { id: string; tenant_id:
         typeof row.calculado_em !== 'string' || !Number.isFinite(Date.parse(row.calculado_em)) ||
         !contagem(row.total) || !contagem(row.enfileirados) || row.enfileirados > row.total ||
         !mapaContagens(row.por_status) || !mapaContagens(row.por_motivo_supressao) ||
+        contarSupressoes(row) > row.total ||
         Object.values(row.por_status).reduce((sum: number, n) => sum + Number(n), 0) !== row.total) {
         throw new Error('Resumo de campanhas inválido')
       }

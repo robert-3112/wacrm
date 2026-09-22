@@ -143,6 +143,16 @@ describe('resolverPublico', () => {
     expect(r.calculadoEm).toBe('2026-07-25T12:00:00Z')
   })
 
+  it('cancelados com motivo não continuam elegíveis nem duplicam supressão', () => {
+    const r = resolverPublico(
+      campanha({ destinatarios_gerados_em: '2026-09-22T12:00:00Z' }),
+      agregado({ total: 10, por_status: { cancelado: 10 }, por_motivo_supressao: { campanha_cancelada: 10 } }),
+    )
+    expect(r.elegiveis).toBe(0)
+    expect(r.suprimidos).toBe(10)
+    expect(r.supressoes).toEqual([expect.objectContaining({ slug: 'campanha_cancelada', total: 10, percentual: 100 })])
+  })
+
   it('agregado vazio não é tratado como materializado, mesmo com a data gravada', () => {
     // A leitura do agregado passa por RLS e pode devolver 0 linhas. Confiar só
     // no total faria "gravado e todo mundo suprimido" e "não consegui ler"

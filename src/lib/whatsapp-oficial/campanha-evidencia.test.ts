@@ -14,6 +14,14 @@ describe('resumo de campanhas', () => {
   it('contadores cumulativos excluem simulado de envio e entrega', () => {
     expect(contadoresCampanha(resumo)).toMatchObject({ total_enviados: 6, total_entregues: 3, total_lidos: 1 })
   })
+  it.each<{ por_status: Record<string, number>; por_motivo_supressao: Record<string, number>; total: number; esperado: number }>([
+    { por_status: { cancelado: 10 }, por_motivo_supressao: { campanha_cancelada: 10 }, total: 10, esperado: 10 },
+    { por_status: { cancelado: 10, suprimido: 3, pendente: 2 }, por_motivo_supressao: { campanha_cancelada: 10, cooldown: 3 }, total: 15, esperado: 13 },
+  ])('conta motivos uma vez sem alterar estado exclusivo: %j', ({ esperado, ...campos }) => {
+    const evidencia = { ...resumo, ...campos }
+    expect(contadoresCampanha(evidencia).total_suprimidos).toBe(esperado)
+    expect(evidencia.por_status).toEqual(campos.por_status)
+  })
   it('lista vazia não chama RPC', async () => {
     const admin = client(null)
     expect(await carregarResumoCampanhas(admin, [])).toEqual([])
@@ -30,7 +38,7 @@ describe('resumo de campanhas', () => {
     ])
   })
   it.each([null, [], [{ ...resumo, broadcast_id: 'invisivel' }], [resumo, resumo],
-    [{ ...resumo, total: 99 }], [{ ...resumo, por_status: null }], [{ ...resumo, calculado_em: null }],
+    [{ ...resumo, total: 99 }], [{ ...resumo, por_motivo_supressao: { campanha_cancelada: 12 } }], [{ ...resumo, por_status: null }], [{ ...resumo, calculado_em: null }],
   ])('recusa resposta ausente ou inválida sem fabricar zeros: %j', async (data) => {
     await expect(carregarResumoCampanhas(client(data), [{ id: 'a', tenant_id: 'sunt' }])).rejects.toThrow()
   })

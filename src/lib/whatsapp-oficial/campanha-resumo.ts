@@ -19,6 +19,7 @@
  * aprovar a campanha errada.
  */
 
+import { contarSupressoes } from './campanha-evidencia'
 import { MOTIVOS_SUPRESSAO_ORDEM, rotuloMotivoSupressao } from './gestao-erros'
 import type { CampanhaDetalhe, DestinatariosAgregado } from '@/types/whatsapp-oficial'
 
@@ -114,7 +115,7 @@ export function resolverPublico(
   const materializou = Boolean(campanha.destinatarios_gerados_em) && (agregado?.total ?? 0) > 0
 
   if (materializou && agregado) {
-    const suprimidos = agregado.por_status.suprimido ?? 0
+    const suprimidos = contarSupressoes(agregado)
     return {
       fonte: 'materializado',
       elegiveis: agregado.total - suprimidos,

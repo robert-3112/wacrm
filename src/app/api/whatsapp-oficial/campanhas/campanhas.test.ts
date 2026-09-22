@@ -566,6 +566,21 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
     expect(lista.campanhas[0]).toEqual(detalhe.campanha)
   })
 
+  it('lista e detalhe preservam cancelado exclusivo e contam dez supressões por cancelamento', async () => {
+    const campanha = { id: CAMPANHA_ID, tenant_id: 'sunt', template_id: null, status: 'cancelado', destinatarios_gerados_em: '2026-09-22T12:00:00Z' }
+    const resumo = { ...resumoRow(), total: 10, enfileirados: 10, por_status: { cancelado: 10 }, por_motivo_supressao: { campanha_cancelada: 10 } }
+    const admin = makeAdmin({ data: [resumo] })
+    const user = { from: vi.fn(() => makeQuery({ data: campanha, error: null })) }
+    autenticado(admin, user)
+    const detalhe = await (await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))).json()
+    user.from.mockImplementation(() => makeQuery({ data: [campanha], error: null }))
+    const lista = await (await listaRoute.GET(getRequest())).json()
+    expect(lista.campanhas[0]).toEqual(detalhe.campanha)
+    expect(detalhe.campanha.total_suprimidos).toBe(10)
+    expect(detalhe.destinatarios.por_status).toEqual({ cancelado: 10 })
+    expect(detalhe.destinatarios.total - detalhe.campanha.total_suprimidos).toBe(0)
+  })
+
   it('CRÍTICO: diz o que o template ainda exige — a tela não tem o catálogo', async () => {
     // `variaveis_padrao` é write-once e é copiado para cada destinatário na
     // materialização: quem aprova precisa saber ANTES do clique que o envio vai
