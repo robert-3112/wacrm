@@ -473,7 +473,7 @@ export function CampanhaNovaDialog({
               }}
             >
               <SelectTrigger id="campanha-publico" className="w-full">
-                <SelectValue />
+                <SelectValue>{modoPublico === "selecionados" ? "Contatos escolhidos" : "Segmento do CRM"}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="selecionados">Contatos escolhidos</SelectItem>
