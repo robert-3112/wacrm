@@ -18,6 +18,7 @@ import type {
   WhatsAppInternalNote,
   WhatsAppMessage,
 } from '@/types/whatsapp-oficial'
+import { traduzirErro } from './gestao-erros'
 
 /** Sent by the human send routes when the send paused Sophia first. */
 export interface SophiaPauseInfo {
@@ -72,7 +73,7 @@ async function request<T>(
 
   if (!res.ok) {
     const error = typeof json.error === 'string' ? json.error : `Falha na requisição (${res.status})`
-    return { ok: false, error }
+    return { ok: false, error: traduzirErro(error, res.status) }
   }
 
   return { ok: true, data: json as T }

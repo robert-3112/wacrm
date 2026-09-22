@@ -12,9 +12,7 @@
  *  3. Lista e detalhe lendo com o cliente COM SESSÃO — ler com service_role
  *     vazaria campanhas de todo mundo para qualquer sessão válida.
  *  4. O dispatch não abortando a fila inteira por causa de uma campanha ruim.
- *  5. O agregado de destinatários paginando com ORDER BY estável e só dizendo
- *     `truncado` quando de fato sobrou linha além do teto — os dois erros aqui
- *     são silenciosos: número errado na tela, sem exceção nenhuma.
+ *  5. Resumo agregado apenas de IDs autorizados, sem totais legados.
  *  6. Config de janela recusada na entrada (metade de janela, lista de dias
  *     vazia ou fora de 1..7), porque a campanha inválida que passa vira uma
  *     campanha que simplesmente nunca envia.
@@ -126,27 +124,15 @@ function makeQuery(outcome: QueryOutcome): QueryStub {
   return q
 }
 
-interface LinhaDestinatario {
-  status: string | null
-  motivo_supressao: string | null
+function resumoRow(id = CAMPANHA_ID) {
+  return { broadcast_id: id, calculado_em: '2026-09-22T15:00:00Z', total: 20,
+    enfileirados: 17, por_status: { pendente: 1, suprimido: 2, simulado: 9, enviado: 3, entregue: 2, lido: 1, falhou: 2 },
+    por_motivo_supressao: { cooldown: 2 } }
 }
-
-/** Uma página por `await` — a rota de detalhe pagina até vir página curta. */
-function makeRecipientsQuery(paginas: LinhaDestinatario[][]): QueryStub {
-  let chamada = 0
-  const q = {} as QueryStub
-  q.select = vi.fn(() => q)
-  q.eq = vi.fn(() => q)
-  q.order = vi.fn(() => q)
-  q.limit = vi.fn(() => q)
-  q.range = vi.fn(() => q)
-  q.maybeSingle = vi.fn(() => Promise.resolve({ data: null, error: null }))
-  q.then = (resolve, reject) => {
-    const pagina = paginas[chamada] ?? []
-    chamada += 1
-    return Promise.resolve({ data: pagina, error: null }).then(resolve, reject)
-  }
-  return q
+function resumoAdmin() {
+  const admin = makeAdmin()
+  admin.rpc.mockImplementation(async (_name, args) => ({ data: args.p_broadcast_ids.map(resumoRow), error: null }))
+  return admin
 }
 
 function autenticado(admin: AdminStub, supabaseUser: { from: Mock } = { from: vi.fn() }) {
@@ -173,9 +159,9 @@ describe('GET /api/whatsapp-oficial/campanhas', () => {
     expect(res.status).toBe(401)
   })
 
-  it('lê com o cliente da sessão e nunca com o service_role', async () => {
-    const admin = makeAdmin()
-    const query = makeQuery({ data: [{ id: CAMPANHA_ID, nome: 'Reativação' }], error: null })
+  it('autoriza com a sessão antes de consultar o resumo de service_role', async () => {
+    const admin = resumoAdmin()
+    const query = makeQuery({ data: [{ id: CAMPANHA_ID, tenant_id: 'sunt', nome: 'Reativação' }], error: null })
     const supabaseUser = { from: vi.fn(() => query) }
     autenticado(admin, supabaseUser)
 
@@ -188,7 +174,8 @@ describe('GET /api/whatsapp-oficial/campanhas', () => {
     // A RLS de whatsapp_broadcasts é a autorização da lista. Se algum dia
     // alguém "consertar" isto para o admin, a lista vaza o tenant inteiro.
     expect(admin.from).not.toHaveBeenCalled()
-    expect(admin.rpc).not.toHaveBeenCalled()
+    expect(admin.rpc).toHaveBeenCalledWith('whatsapp_oficial_campanhas_resumo', { p_tenant_id: 'sunt', p_broadcast_ids: [CAMPANHA_ID] })
+    expect(query.select.mock.invocationCallOrder[0]).toBeLessThan(admin.rpc.mock.invocationCallOrder[0])
   })
 
   it('repassa os filtros de status e canal', async () => {
@@ -213,8 +200,9 @@ describe('GET /api/whatsapp-oficial/campanhas', () => {
     // A rota pede teto+1 linhas só para saber se o corte aconteceu — antes o
     // teto cortava em silêncio e a tela jurava que a base inteira eram 100
     // campanhas.
-    const linhas = Array.from({ length: 101 }, (_, i) => ({ id: `c-${i}` }))
-    autenticado(makeAdmin(), { from: vi.fn(() => makeQuery({ data: linhas, error: null })) })
+    const linhas = Array.from({ length: 101 }, (_, i) => ({ id: `c-${i}`, tenant_id: 'sunt' }))
+    const admin = resumoAdmin()
+    autenticado(admin, { from: vi.fn(() => makeQuery({ data: linhas, error: null })) })
 
     const res = await listaRoute.GET(getRequest())
     const json = await res.json()
@@ -222,16 +210,21 @@ describe('GET /api/whatsapp-oficial/campanhas', () => {
     expect(res.status).toBe(200)
     expect(json.truncado).toBe(true)
     expect(json.campanhas).toHaveLength(100)
+    expect(admin.rpc).toHaveBeenCalledTimes(1)
+    expect(admin.rpc.mock.calls[0][1].p_broadcast_ids).toEqual(linhas.slice(0, 100).map(c => c.id))
   })
 
   it('exatamente no teto NÃO é truncado', async () => {
-    const linhas = Array.from({ length: 100 }, (_, i) => ({ id: `c-${i}` }))
-    autenticado(makeAdmin(), { from: vi.fn(() => makeQuery({ data: linhas, error: null })) })
+    const linhas = Array.from({ length: 100 }, (_, i) => ({ id: `c-${i}`, tenant_id: 'sunt' }))
+    const admin = resumoAdmin()
+    autenticado(admin, { from: vi.fn(() => makeQuery({ data: linhas, error: null })) })
 
     const json = await (await listaRoute.GET(getRequest())).json()
 
     expect(json.truncado).toBe(false)
     expect(json.campanhas).toHaveLength(100)
+    expect(admin.rpc).toHaveBeenCalledTimes(1)
+    expect(admin.rpc.mock.calls[0][1].p_broadcast_ids).toEqual(linhas.slice(0, 100).map(c => c.id))
   })
 
   it('a lista tem orçamento PRÓPRIO de leitura (60/min), não o de escrita (20/min)', async () => {
@@ -254,7 +247,7 @@ describe('POST /api/whatsapp-oficial/campanhas', () => {
     nome: 'Reativação bolsão',
     templateId: TEMPLATE_ID,
     config: {
-      segmentacao: { etapas: ['novo'], sem_corretor: true },
+      segmentacao: { modo: 'segmento', confirmado: true, etapas: ['novo'], sem_corretor: true },
       politica_consentimento: 'exigir_base_legal',
       bases_legais: ['fb_lead_form'],
       cadencia_segundos: 30,
@@ -556,47 +549,36 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
     expect(res.status).toBe(401)
   })
 
-  it('agrega destinatários por status e por motivo, lendo com a sessão', async () => {
-    const admin = makeAdmin()
-    const campanhaQuery = makeQuery({
-      data: {
-        id: CAMPANHA_ID,
-        nome: 'Reativação',
-        status: 'rascunho',
-        dry_run_resultado: { elegiveis: 4, suprimidos: 2 },
-      },
-      error: null,
-    })
-    const destinatariosQuery = makeRecipientsQuery([
-      [
-        { status: 'pendente', motivo_supressao: null },
-        { status: 'pendente', motivo_supressao: null },
-        { status: 'suprimido', motivo_supressao: 'optout' },
-        { status: 'suprimido', motivo_supressao: 'cooldown' },
-        { status: 'suprimido', motivo_supressao: 'optout' },
-      ],
-    ])
-    const supabaseUser = {
-      from: vi.fn((tabela: string) =>
-        tabela === 'whatsapp_broadcasts' ? campanhaQuery : destinatariosQuery,
-      ),
-    }
-    autenticado(admin, supabaseUser)
+  it('usa a mesma projeção na lista e detalhe, sem paginar recipients', async () => {
+    const campanha = { id: CAMPANHA_ID, tenant_id: 'sunt', template_id: null, total_enviados: 999, dry_run_resultado: { elegiveis: 4 } }
+    const admin = resumoAdmin()
+    const user = { from: vi.fn(() => makeQuery({ data: campanha, error: null })) }
+    autenticado(admin, user)
+    const detalhe = await (await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))).json()
+    expect(user.from).toHaveBeenCalledTimes(1)
+    expect(detalhe.campanha.total_enviados).toBe(6)
+    expect(detalhe.campanha.total_entregues).toBe(3)
+    expect(detalhe.campanha.total_lidos).toBe(1)
+    expect(detalhe.campanha.resumo).toEqual(detalhe.destinatarios)
+    expect(detalhe.campanha.dry_run_resultado).toEqual({ elegiveis: 4 })
+    user.from.mockImplementation(() => makeQuery({ data: [campanha], error: null }))
+    const lista = await (await listaRoute.GET(getRequest())).json()
+    expect(lista.campanhas[0]).toEqual(detalhe.campanha)
+  })
 
-    const res = await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
-    const json = await res.json()
-
-    expect(res.status).toBe(200)
-    expect(json.campanha.dry_run_resultado).toEqual({ elegiveis: 4, suprimidos: 2 })
-    expect(json.destinatarios).toEqual({
-      total: 5,
-      truncado: false,
-      por_status: { pendente: 2, suprimido: 3 },
-      por_motivo_supressao: { optout: 2, cooldown: 1 },
-    })
-    expect(supabaseUser.from).toHaveBeenCalledWith('whatsapp_broadcasts')
-    expect(supabaseUser.from).toHaveBeenCalledWith('whatsapp_broadcast_recipients')
-    expect(admin.from).not.toHaveBeenCalled()
+  it('lista e detalhe preservam cancelado exclusivo e contam dez supressões por cancelamento', async () => {
+    const campanha = { id: CAMPANHA_ID, tenant_id: 'sunt', template_id: null, status: 'cancelado', destinatarios_gerados_em: '2026-09-22T12:00:00Z' }
+    const resumo = { ...resumoRow(), total: 10, enfileirados: 10, por_status: { cancelado: 10 }, por_motivo_supressao: { campanha_cancelada: 10 } }
+    const admin = makeAdmin({ data: [resumo] })
+    const user = { from: vi.fn(() => makeQuery({ data: campanha, error: null })) }
+    autenticado(admin, user)
+    const detalhe = await (await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))).json()
+    user.from.mockImplementation(() => makeQuery({ data: [campanha], error: null }))
+    const lista = await (await listaRoute.GET(getRequest())).json()
+    expect(lista.campanhas[0]).toEqual(detalhe.campanha)
+    expect(detalhe.campanha.total_suprimidos).toBe(10)
+    expect(detalhe.destinatarios.por_status).toEqual({ cancelado: 10 })
+    expect(detalhe.destinatarios.total - detalhe.campanha.total_suprimidos).toBe(0)
   })
 
   it('CRÍTICO: diz o que o template ainda exige — a tela não tem o catálogo', async () => {
@@ -606,7 +588,7 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
     // propósito — o sync reescreve `variaveis` de um template já aprovado.
     const campanhaQuery = makeQuery({
       data: {
-        id: CAMPANHA_ID,
+        id: CAMPANHA_ID, tenant_id: 'sunt',
         nome: 'Reativação',
         template_id: TEMPLATE_ID,
         variaveis_padrao: { body: ['Ana'] },
@@ -629,10 +611,10 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
       from: vi.fn((tabela: string) => {
         if (tabela === 'whatsapp_broadcasts') return campanhaQuery
         if (tabela === 'whatsapp_templates') return templateQuery
-        return makeRecipientsQuery([[]])
+        return makeQuery({ data: [], error: null })
       }),
     }
-    autenticado(makeAdmin(), supabaseUser)
+    autenticado(resumoAdmin(), supabaseUser)
 
     const res = await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
     const json = await res.json()
@@ -651,15 +633,15 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
 
   it('campanha sem template não consulta o catálogo e devolve exigencias null', async () => {
     const campanhaQuery = makeQuery({
-      data: { id: CAMPANHA_ID, template_id: null, variaveis_padrao: null },
+      data: { id: CAMPANHA_ID, tenant_id: 'sunt', template_id: null, variaveis_padrao: null },
       error: null,
     })
     const supabaseUser = {
       from: vi.fn((tabela: string) =>
-        tabela === 'whatsapp_broadcasts' ? campanhaQuery : makeRecipientsQuery([[]]),
+        tabela === 'whatsapp_broadcasts' ? campanhaQuery : makeQuery({ data: [], error: null }),
       ),
     }
-    autenticado(makeAdmin(), supabaseUser)
+    autenticado(resumoAdmin(), supabaseUser)
 
     const json = await (await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))).json()
 
@@ -667,85 +649,15 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
     expect(supabaseUser.from).not.toHaveBeenCalledWith('whatsapp_templates')
   })
 
-  it('ordena TODA página do agregado por uma coluna estável e única', async () => {
-    const campanhaQuery = makeQuery({ data: { id: CAMPANHA_ID }, error: null })
-    // Página cheia (3) + página curta (1) = duas idas ao banco.
-    const destinatariosQuery = makeRecipientsQuery([
-      [
-        { status: 'pendente', motivo_supressao: null },
-        { status: 'pendente', motivo_supressao: null },
-        { status: 'pendente', motivo_supressao: null },
-      ],
-      [{ status: 'enviado', motivo_supressao: null }],
-    ])
-    autenticado(makeAdmin(), {
-      from: vi.fn((tabela: string) =>
-        tabela === 'whatsapp_broadcasts' ? campanhaQuery : destinatariosQuery,
-      ),
-    })
-
-    const res = await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
-    const json = await res.json()
-
-    expect(res.status).toBe(200)
-    expect(json.destinatarios.total).toBe(4)
-    // Sem ORDER BY o Postgres não promete ordem entre uma página e a seguinte:
-    // o dispatch marcando `enfileirado_em` no meio da contagem faz linha
-    // reaparecer numa página posterior (contada duas vezes) ou fugir para trás
-    // do cursor (nunca contada), e o agregado sai errado em silêncio.
-    expect(destinatariosQuery.order.mock.calls).toEqual([
-      ['id', { ascending: true }],
-      ['id', { ascending: true }],
-    ])
-  })
-
-  describe('teto do agregado', () => {
-    /** 20 páginas cheias de 1000 = exatamente MAX_LINHAS_DESTINATARIOS. */
-    function paginasAteOTeto(): LinhaDestinatario[][] {
-      const cheia: LinhaDestinatario[] = Array.from({ length: 1000 }, () => ({
-        status: 'pendente',
-        motivo_supressao: null,
-      }))
-      return Array.from({ length: 20 }, () => cheia)
-    }
-
-    function detalheCom(paginas: LinhaDestinatario[][]) {
-      const campanhaQuery = makeQuery({ data: { id: CAMPANHA_ID }, error: null })
-      const destinatariosQuery = makeRecipientsQuery(paginas)
-      autenticado(makeAdmin(), {
-        from: vi.fn((tabela: string) =>
-          tabela === 'whatsapp_broadcasts' ? campanhaQuery : destinatariosQuery,
-        ),
-      })
-      return detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
-    }
-
-    it('total EXATAMENTE no teto não é truncado', async () => {
-      // Não existe linha 20.001: o agregado está completo. Dizer "truncado"
-      // aqui manda o operador caçar destinatários que não existem.
-      const json = await (await detalheCom(paginasAteOTeto())).json()
-
-      expect(json.destinatarios.total).toBe(20_000)
-      expect(json.destinatarios.truncado).toBe(false)
-    })
-
-    it('teto + 1 é truncado, e a linha espiada não entra na conta', async () => {
-      const json = await (
-        await detalheCom([...paginasAteOTeto(), [{ status: 'pendente', motivo_supressao: null }]])
-      ).json()
-
-      expect(json.destinatarios.total).toBe(20_000)
-      expect(json.destinatarios.truncado).toBe(true)
-    })
-  })
-
   it('devolve 404 quando a RLS esconde a campanha', async () => {
     const campanhaQuery = makeQuery({ data: null, error: null })
-    autenticado(makeAdmin(), { from: vi.fn(() => campanhaQuery) })
+    const admin = resumoAdmin()
+    autenticado(admin, { from: vi.fn(() => campanhaQuery) })
 
     const res = await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
 
     expect(res.status).toBe(404)
+    expect(admin.rpc).not.toHaveBeenCalled()
   })
 
   it('devolve 404 para um id fora do formato uuid, sem consultar o banco', async () => {
@@ -756,6 +668,36 @@ describe('GET /api/whatsapp-oficial/campanhas/[id]', () => {
 
     expect(res.status).toBe(404)
     expect(supabaseUser.from).not.toHaveBeenCalled()
+  })
+})
+
+describe('resumo agregado falha fechado nas duas rotas', () => {
+  it.each(['lista', 'detalhe'])('%s não chama RPC quando SELECT falha', async (rota) => {
+    const admin = resumoAdmin()
+    autenticado(admin, { from: vi.fn(() => makeQuery({ data: null, error: { message: 'db down' } })) })
+    const res = rota === 'lista' ? await listaRoute.GET(getRequest()) : await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
+    expect(res.status).toBe(500)
+    expect(admin.rpc).not.toHaveBeenCalled()
+  })
+  it('lista invisível pela RLS não chama RPC', async () => {
+    const admin = resumoAdmin()
+    autenticado(admin, { from: vi.fn(() => makeQuery({ data: [], error: null })) })
+    expect((await listaRoute.GET(getRequest())).status).toBe(200)
+    expect(admin.rpc).not.toHaveBeenCalled()
+  })
+  it.each([
+    { data: null, error: null }, { data: [], error: null }, { data: null, error: { message: 'db down' } },
+  ])('nenhuma rota devolve totais legados se o resumo falha: %j', async (outcome) => {
+    const campanha = { id: CAMPANHA_ID, tenant_id: 'sunt', total_enviados: 999 }
+    const admin = makeAdmin(outcome)
+    autenticado(admin, { from: vi.fn(() => makeQuery({ data: [campanha], error: null })) })
+    const lista = await listaRoute.GET(getRequest())
+    expect(lista.status).toBe(500)
+    expect(await lista.json()).not.toHaveProperty('campanhas')
+    autenticado(admin, { from: vi.fn(() => makeQuery({ data: campanha, error: null })) })
+    const detalhe = await detalheRoute.GET(getRequest(), routeParams(CAMPANHA_ID))
+    expect(detalhe.status).toBe(500)
+    expect(await detalhe.json()).not.toHaveProperty('campanha')
   })
 })
 

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { carregarResumoCampanhas } from '@/lib/whatsapp-oficial/campanha-evidencia'
 import { requireGestaoSession, toErrorResponse, BadRequestError } from '@/lib/whatsapp-oficial/api-auth'
 import {
   WHATSAPP_OFICIAL_RATE_LIMITS,
@@ -16,7 +17,8 @@ import { validarVariaveisPadrao } from '@/lib/whatsapp-oficial/template-campos'
  *   só para gestão, então a própria RLS é o filtro de autorização da lista —
  *   um corretor logado enxerga zero linhas em vez de 403. Ler com
  *   `service_role` aqui seria vazar a base inteira de campanhas para qualquer
- *   sessão válida.
+ *   sessão válida. O resumo de service_role recebe somente IDs e tenant
+ *   devolvidos pelo SELECT autorizado, em um lote por tenant.
  * - POST usa `service_role` porque a tabela não tem policy de INSERT: quem
  *   valida o papel do ator é a RPC `whatsapp_oficial_campanha_criar`
  *   (`whatsapp_campanha_ator_autorizado`, que levanta 42501 quando o ator não
@@ -91,7 +93,7 @@ function unprocessable(slug: string, extra?: Record<string, unknown>): NextRespo
 
 export async function GET(request: Request): Promise<Response> {
   try {
-    const { userId, supabaseUser } = await requireGestaoSession()
+    const { userId, supabaseUser, admin } = await requireGestaoSession()
 
     // Orçamento de LEITURA — o de escrita (campanhaWrite) é apertado de
     // propósito e uma tela recarregando a lista não pode consumi-lo.
@@ -129,12 +131,14 @@ export async function GET(request: Request): Promise<Response> {
     const { data, error } = await query
     if (error) throw error
 
-    const linhas = data ?? []
+    const linhas = (data ?? []) as unknown as { id: string; tenant_id: string }[]
     const truncado = linhas.length > LISTA_MAX_LINHAS
+
+    const campanhas = await carregarResumoCampanhas(admin, linhas.slice(0, LISTA_MAX_LINHAS))
 
     return NextResponse.json({
       ok: true,
-      campanhas: truncado ? linhas.slice(0, LISTA_MAX_LINHAS) : linhas,
+      campanhas,
       truncado,
     })
   } catch (error) {
@@ -190,6 +194,35 @@ export async function POST(request: Request): Promise<Response> {
         return unprocessable('config_invalida')
       }
       config = body.config as Record<string, unknown>
+    }
+
+    // Seleção explícita nunca pode virar público irrestrito por omissão de IDs.
+    if (!config.segmentacao || typeof config.segmentacao !== 'object' || Array.isArray(config.segmentacao)) {
+      return unprocessable('segmentacao_invalida')
+    }
+    const seg = config.segmentacao as Record<string, unknown>
+    if (seg.modo !== 'selecionados' && seg.modo !== 'segmento') {
+      return unprocessable('segmentacao_invalida')
+    }
+    if (seg.modo === 'segmento' && (seg.confirmado !== true || 'lead_ids' in seg)) {
+      return unprocessable('segmentacao_invalida')
+    }
+    if (seg.modo === 'selecionados') {
+      if (!Array.isArray(seg.lead_ids) || seg.lead_ids.length === 0 || seg.lead_ids.length > 500 ||
+        seg.lead_ids.some((id) => typeof id !== 'string' || !UUID_RE.test(id))) {
+        return unprocessable('lead_ids_invalidos')
+      }
+    }
+    const agendado = config.agendado_para
+    if (agendado !== undefined && agendado !== null) {
+      // O navegador serializa seu datetime-local como UTC. Recusar datas
+      // normalizadas por Date evita que 31/02 vire silenciosamente março.
+      const data = typeof agendado === 'string' ? new Date(agendado) : null
+      if (typeof agendado !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(agendado) ||
+        !data || !Number.isFinite(data.getTime()) || data.getTime() <= Date.now() ||
+        data.toISOString() !== (agendado.includes('.') ? agendado : agendado.replace('Z', '.000Z'))) {
+        return unprocessable('agendamento_invalido')
+      }
     }
 
     const basesLegais = config.bases_legais

@@ -30,6 +30,8 @@ import type { CampanhaStatus, TemplateStatusAprovacao } from '@/types/whatsapp-o
  * daí `Unauthorized`/`Forbidden`/`Not found` estarem nesta mesma tabela).
  */
 const MENSAGENS: Record<string, string> = {
+  fora_da_janela_24h: 'A janela de 24 horas terminou. Use um template aprovado ou aguarde uma nova mensagem do contato.',
+  destinatario_fora_allowlist: 'Este destinatário ainda não está autorizado no piloto.',
   // -- api-auth / toErrorResponse -------------------------------------------
   Unauthorized: 'Sessão expirada. Entre novamente para continuar.',
   Forbidden: 'Seu usuário não tem papel de gestão para executar esta ação.',
@@ -91,6 +93,9 @@ const MENSAGENS: Record<string, string> = {
   nome_muito_longo: 'O nome da campanha passa de 200 caracteres.',
   mensagem_livre_invalida: 'A mensagem livre é inválida.',
   config_invalida: 'A configuração da campanha é inválida.',
+  segmentacao_invalida: 'Confira os filtros e confirme o escopo do público da campanha.',
+  lead_ids_invalidos: 'Selecione entre 1 e 500 contatos válidos do CRM.',
+  agendamento_invalido: 'Escolha uma data e um horário válidos no futuro e confira o fuso.',
   campanha_nao_criada: 'A campanha não foi criada.',
   status_invalido_filtro: 'Filtro de status inválido.',
   bases_legais_invalida: 'Lista de bases legais inválida.',
@@ -289,7 +294,11 @@ export function rotuloStatusCampanha(status: string): string {
 const STATUS_DESTINATARIO: Record<string, string> = {
   pendente: 'Pendente',
   enfileirado: 'Enfileirado',
-  enviado: 'Enfileirado no provedor',
+  enviado: 'Enviado ao provedor',
+  processando: 'Processando',
+  aguardando_retry: 'Aguardando nova tentativa',
+  simulado: 'Simulado, sem envio',
+  inconsistente: 'Inconsistente — revisar',
   entregue: 'Entregue',
   lido: 'Lido',
   falhou: 'Falhou',

@@ -10,6 +10,7 @@ import {
   rateLimitResponse,
 } from '@/lib/whatsapp-oficial/rate-limit'
 import { pauseSophiaForHumanSend } from '@/lib/whatsapp-oficial/sophia-pause'
+import { readConversationWindow } from '@/lib/whatsapp-oficial/conversation-window'
 
 /**
  * Queue a text reply for an official-channel conversation. The request is
@@ -53,6 +54,11 @@ export async function POST(request: Request): Promise<Response> {
       WHATSAPP_OFICIAL_RATE_LIMITS.messageSend,
     )
     if (!rl.success) return rateLimitResponse(rl)
+
+    const window = await readConversationWindow(admin, conversation)
+    if (window.applies && !window.open) {
+      return NextResponse.json({ error: 'fora_da_janela_24h' }, { status: 409 })
+    }
 
     const sophia = await pauseSophiaForHumanSend(admin, conversation, userId)
     if (sophia instanceof Response) return sophia

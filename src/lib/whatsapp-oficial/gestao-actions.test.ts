@@ -25,12 +25,47 @@ import {
   montarQueryTemplates,
   montarValoresPreview,
   previewTemplate,
+  serializarAgendamento,
   SLUG_FALHA_DE_REDE,
   type FormularioCampanha,
 } from './gestao-actions'
 
 const CAMPANHA_ID = '11111111-1111-4111-8111-111111111111'
 const CANAL_ID = '22222222-2222-4222-8222-222222222222'
+
+describe('público explícito e agendamento', () => {
+  it.each([undefined, {}, { etapas: ['novo'] }])('sem modo explícito exige contatos e não amplia por omissão: %j', (segmentacao) => {
+    expect(() => montarConfigCampanha({ canalId: CANAL_ID, nome: 'Rascunho', segmentacao })).toThrow('Selecione')
+  })
+  it('modo segmento exige confirmação e não mantém IDs de uma seleção anterior', () => {
+    expect(() => montarConfigCampanha({ canalId: CANAL_ID, nome: 'Segmento', modoPublico: 'segmento' })).toThrow('Confirme')
+    expect(montarConfigCampanha({ canalId: CANAL_ID, nome: 'Segmento', modoPublico: 'segmento',
+      confirmarSegmento: true, segmentacao: { leadIds: [CAMPANHA_ID], tags: ['teste'] } }).segmentacao)
+      .toEqual({ modo: 'segmento', confirmado: true, tags: ['teste'] })
+  })
+  it('preserva e deduplica IDs, mantendo filtros como restrições adicionais', () => {
+    expect(montarConfigCampanha({ canalId: CANAL_ID, nome: 'Piloto',
+      segmentacao: { leadIds: [CAMPANHA_ID, CAMPANHA_ID], etapas: ['novo'] },
+    }).segmentacao).toEqual({ modo: 'selecionados', lead_ids: [CAMPANHA_ID], etapas: ['novo'] })
+  })
+  it('recusa seleção vazia em vez de omitir o filtro de IDs', () => {
+    expect(() => montarConfigCampanha({ canalId: CANAL_ID, nome: 'Piloto',
+      segmentacao: { leadIds: [] },
+    })).toThrow('Selecione')
+    expect(() => montarConfigCampanha({ canalId: CANAL_ID, nome: 'Piloto', modoPublico: 'selecionados' })).toThrow('Selecione')
+  })
+  it('serializa o datetime-local como o instante UTC correspondente', () => {
+    const local = '2099-10-20T14:35'
+    expect(serializarAgendamento(local, 0)).toBe(new Date(2099, 9, 20, 14, 35).toISOString())
+    expect(montarConfigCampanha({ canalId: CANAL_ID, nome: 'Agendada', agendadoPara: local, segmentacao: { leadIds: [CAMPANHA_ID] } })
+      .agendado_para).toBe(new Date(2099, 9, 20, 14, 35).toISOString())
+  })
+  it.each(['2025-01-01T12:00', '2099-02-31T12:00', 'inválido', '2099-01-01T24:00'])
+    ('recusa horário passado ou data inválida: %s', (valor) => {
+      expect(() => serializarAgendamento(valor, new Date('2026-01-01').getTime())).toThrow()
+    })
+  it('omite agendamento vazio', () => expect(serializarAgendamento('')).toBeUndefined())
+})
 
 function mockFetch(resposta: { status?: number; body?: unknown }) {
   const fn = vi.fn().mockResolvedValue({
@@ -127,10 +162,12 @@ describe('montarValoresPreview', () => {
 // ---------------------------------------------------------------- campanhas
 
 describe('montarConfigCampanha', () => {
-  const base: FormularioCampanha = { canalId: CANAL_ID, nome: 'Reativação' }
+  const publico = { modo: 'segmento', confirmado: true }
+  const configPublico = { segmentacao: publico }
+  const base: FormularioCampanha = { canalId: CANAL_ID, nome: 'Reativação', modoPublico: 'segmento', confirmarSegmento: true }
 
-  it('formulário em branco não produz config nenhuma', () => {
-    expect(montarConfigCampanha(base)).toEqual({})
+  it('preserva a confirmação de público mesmo sem filtros adicionais', () => {
+    expect(montarConfigCampanha(base)).toEqual(configPublico)
   })
 
   it('CRÍTICO: lista vazia é omitida, nunca enviada como []', () => {
@@ -143,10 +180,10 @@ describe('montarConfigCampanha', () => {
     // `bases_legais: []` com a política padrão suprime TODO MUNDO;
     // `janela_dias: []` bloqueia todos os dias. Nenhuma das duas chaves pode
     // sair daqui.
-    expect(config).toEqual({})
+    expect(config).toEqual(configPublico)
     expect('bases_legais' in config).toBe(false)
     expect('janela_dias' in config).toBe(false)
-    expect('segmentacao' in config).toBe(false)
+    expect(config.segmentacao).toEqual(publico)
   })
 
   it('descarta strings em branco dentro das listas', () => {
@@ -156,15 +193,16 @@ describe('montarConfigCampanha', () => {
       segmentacao: { tags: ['  ', 'bolsao'] },
     })
     expect('bases_legais' in config).toBe(false)
-    expect(config.segmentacao).toEqual({ tags: ['bolsao'] })
+    expect(config.segmentacao).toEqual({ ...publico, tags: ['bolsao'] })
   })
 
   it('CRÍTICO: meia janela não é enviada', () => {
-    expect(montarConfigCampanha({ ...base, janelaInicio: '09:00' })).toEqual({})
-    expect(montarConfigCampanha({ ...base, janelaFim: '18:00' })).toEqual({})
+    expect(montarConfigCampanha({ ...base, janelaInicio: '09:00' })).toEqual(configPublico)
+    expect(montarConfigCampanha({ ...base, janelaFim: '18:00' })).toEqual(configPublico)
     expect(montarConfigCampanha({ ...base, janelaInicio: '09:00', janelaFim: '18:00' })).toEqual({
       janela_inicio: '09:00',
       janela_fim: '18:00',
+      ...configPublico,
     })
   })
 
@@ -176,13 +214,13 @@ describe('montarConfigCampanha', () => {
   it('omite janela_dias quando nada sobrou do filtro', () => {
     // `[0, 8]` sem filtro viraria `janela_dias_invalida`; filtrado, viraria
     // `[]`, que é o pior dos dois. Omitir é o único resultado seguro.
-    expect(montarConfigCampanha({ ...base, janelaDias: [0, 8] })).toEqual({})
+    expect(montarConfigCampanha({ ...base, janelaDias: [0, 8] })).toEqual(configPublico)
   })
 
   it('só manda sem_corretor quando é true', () => {
-    expect(montarConfigCampanha({ ...base, segmentacao: { semCorretor: false } })).toEqual({})
+    expect(montarConfigCampanha({ ...base, segmentacao: { semCorretor: false } })).toEqual(configPublico)
     expect(montarConfigCampanha({ ...base, segmentacao: { semCorretor: true } })).toEqual({
-      segmentacao: { sem_corretor: true },
+      segmentacao: { ...publico, sem_corretor: true },
     })
   })
 
@@ -194,7 +232,7 @@ describe('montarConfigCampanha', () => {
       loteMax: 50,
       limiteDiario: null,
     })
-    expect(config).toEqual({ cooldown_dias: 30, lote_max: 50 })
+    expect(config).toEqual({ ...configPublico, cooldown_dias: 30, lote_max: 50 })
   })
 
   it('aceita zero como valor legítimo', () => {
@@ -231,10 +269,16 @@ describe('montarConfigCampanha', () => {
 })
 
 describe('montarCorpoCampanha', () => {
-  it('manda o mínimo quando só há nome e canal', () => {
-    expect(montarCorpoCampanha({ canalId: CANAL_ID, nome: '  Reativação  ' })).toEqual({
+  const selecao = { leadIds: [CAMPANHA_ID] }
+  const configPublico = { segmentacao: { modo: 'selecionados', lead_ids: [CAMPANHA_ID] } }
+  it('nome e canal sozinhos não autorizam criação', () => {
+    expect(() => montarCorpoCampanha({ canalId: CANAL_ID, nome: 'Reativação' })).toThrow('Selecione')
+  })
+  it('manda o mínimo com seleção explícita de contatos', () => {
+    expect(montarCorpoCampanha({ canalId: CANAL_ID, nome: '  Reativação  ', segmentacao: selecao })).toEqual({
       canalId: CANAL_ID,
       nome: 'Reativação',
+      config: configPublico,
     })
   })
 
@@ -244,29 +288,31 @@ describe('montarCorpoCampanha', () => {
       nome: 'X',
       templateId: null,
       mensagemLivre: '   ',
+      segmentacao: selecao,
     })
     expect('templateId' in corpo).toBe(false)
     expect('mensagemLivre' in corpo).toBe(false)
   })
 
-  it('inclui config só quando ela tem conteúdo', () => {
-    const semConfig = montarCorpoCampanha({ canalId: CANAL_ID, nome: 'X', basesLegais: [] })
-    expect('config' in semConfig).toBe(false)
+  it('sempre inclui o escopo na config, mesmo sem outras opções', () => {
+    const semConfig = montarCorpoCampanha({ canalId: CANAL_ID, nome: 'X', basesLegais: [], segmentacao: selecao })
+    expect(semConfig.config).toEqual(configPublico)
     const comConfig = montarCorpoCampanha({
       canalId: CANAL_ID,
       nome: 'X',
       basesLegais: ['fb_lead_form'],
+      segmentacao: selecao,
     })
-    expect(comConfig.config).toEqual({ bases_legais: ['fb_lead_form'] })
+    expect(comConfig.config).toEqual({ ...configPublico, bases_legais: ['fb_lead_form'] })
   })
 
   it('criarCampanha posta o corpo montado', async () => {
     const fn = mockFetch({ status: 201, body: { ok: true, broadcast_id: CAMPANHA_ID } })
-    await criarCampanha({ canalId: CANAL_ID, nome: 'Reativação', basesLegais: ['fb_lead_form'] })
+    await criarCampanha({ canalId: CANAL_ID, nome: 'Reativação', basesLegais: ['fb_lead_form'], segmentacao: selecao })
     expect(corpoEnviado(fn)).toEqual({
       canalId: CANAL_ID,
       nome: 'Reativação',
-      config: { bases_legais: ['fb_lead_form'] },
+      config: { ...configPublico, bases_legais: ['fb_lead_form'] },
     })
   })
 })

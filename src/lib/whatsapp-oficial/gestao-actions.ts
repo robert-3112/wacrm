@@ -241,10 +241,15 @@ export interface FormularioCampanha {
   janelaInicio?: string
   janelaFim?: string
   janelaDias?: number[]
+  /** Valor de datetime-local no fuso do navegador. */
+  agendadoPara?: string
+  modoPublico?: 'selecionados' | 'segmento'
+  confirmarSegmento?: boolean
   /** Já na FORMA DE ENVIO (`SendTimeParams`), montada por
    *  `montarVariaveisPadrao` — não é o vocabulário do preview. */
   variaveisPadrao?: VariaveisPadrao
   segmentacao?: {
+    leadIds?: string[]
     etapas?: string[]
     temperaturas?: string[]
     tags?: string[]
@@ -253,6 +258,34 @@ export interface FormularioCampanha {
     criadoDe?: string
     criadoAte?: string
   }
+}
+
+/** Rejeita também datas normalizadas silenciosamente por Date (ex.: 31/02). */
+export function serializarAgendamento(valor: string, agora = Date.now()): string | undefined {
+  if (!valor.trim()) return undefined
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(valor)) {
+    throw new Error('Informe uma data e um horário válidos.')
+  }
+  const [ano, mes, dia, hora, minuto] = valor.split(/\D/).map(Number)
+  const data = new Date(ano, mes - 1, dia, hora, minuto)
+  if (data.getFullYear() !== ano || data.getMonth() !== mes - 1 || data.getDate() !== dia ||
+    data.getHours() !== hora || data.getMinutes() !== minuto) {
+    throw new Error('Informe uma data e um horário válidos nesse fuso.')
+  }
+  if (data.getTime() <= agora) throw new Error('Escolha uma data e um horário no futuro.')
+  return data.toISOString()
+}
+
+export interface LeadCampanha {
+  id: string
+  nome: string
+  telefone: string | null
+}
+
+export function buscarLeadsCampanha(q: string, signal?: AbortSignal) {
+  return requisitar<{ leads: LeadCampanha[]; truncado: boolean }>(
+    `/api/whatsapp-oficial/campanhas/leads?${new URLSearchParams({ q })}`, { signal },
+  )
 }
 
 /**
@@ -275,6 +308,8 @@ export interface FormularioCampanha {
  */
 export function montarConfigCampanha(form: FormularioCampanha): Record<string, unknown> {
   const config: Record<string, unknown> = {}
+  const agendado = serializarAgendamento(form.agendadoPara ?? '')
+  if (agendado) config.agendado_para = agendado
 
   if (form.politicaConsentimento) config.politica_consentimento = form.politicaConsentimento
   if (form.politicaHandoff) config.politica_handoff = form.politicaHandoff
@@ -301,6 +336,16 @@ export function montarConfigCampanha(form: FormularioCampanha): Record<string, u
   if (dias.length > 0) config.janela_dias = [...new Set(dias)].sort((a, b) => a - b)
 
   const seg: Record<string, unknown> = {}
+  if (form.modoPublico === 'segmento') {
+    if (!form.confirmarSegmento) throw new Error('Confirme o escopo do segmento do CRM.')
+    seg.modo = 'segmento'
+    seg.confirmado = true
+  } else {
+    const ids = [...new Set((form.segmentacao?.leadIds ?? []).map((id) => id.trim()).filter(Boolean))]
+    if (ids.length === 0) throw new Error('Selecione ao menos um contato do CRM.')
+    seg.modo = 'selecionados'
+    seg.lead_ids = ids
+  }
   const listas: [keyof NonNullable<FormularioCampanha['segmentacao']>, string][] = [
     ['etapas', 'etapas'],
     ['temperaturas', 'temperaturas'],

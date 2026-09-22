@@ -1,15 +1,5 @@
 "use client";
 
-/**
- * Lista de campanhas do canal + criação.
- *
- * A lista NÃO mostra "enviados" como sinônimo de "entregues": as colunas de
- * contagem que a rota devolve contam itens que passaram pelo worker, e no modo
- * shadow eles foram simulados. Por isso o rótulo é "enfileirados" — a mesma
- * disciplina de vocabulário que a rota de envio aplica ao responder
- * `enfileirado: true`.
- */
-
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -28,6 +18,8 @@ import {
 } from "@/components/ui/select";
 import { listarCampanhas, listarTemplates } from "@/lib/whatsapp-oficial/gestao-actions";
 import { rotuloStatusCampanha } from "@/lib/whatsapp-oficial/gestao-erros";
+import { CampanhaContadores, AtualizarCampanhas } from './campanha-contadores';
+import { dataCampanha } from '@/lib/whatsapp-oficial/campanha-evidencia';
 import { CampanhaNovaDialog } from "./campanha-nova-dialog";
 import { CanalPicker } from "./canal-picker";
 import { badgeStatusCampanha } from "./gestao-shell";
@@ -136,6 +128,7 @@ export function CampanhasClient({ canais }: { canais: WhatsAppCanal[] }) {
       </div>
 
       <div className="flex flex-wrap items-end gap-3">
+        <AtualizarCampanhas carregando={carregando} onAtualizar={() => void carregar(canalId, status)} />
         <div className="space-y-1.5">
           <Label htmlFor="filtro-status-campanha" className="text-xs text-muted-foreground">
             Status
@@ -187,10 +180,9 @@ export function CampanhasClient({ canais }: { canais: WhatsAppCanal[] }) {
   );
 }
 
-function LinhaCampanha({ campanha }: { campanha: CampanhaResumo }) {
+export function LinhaCampanha({ campanha }: { campanha: CampanhaResumo }) {
   const publico = campanha.total_destinatarios ?? 0;
   const suprimidos = campanha.total_suprimidos ?? 0;
-  const enfileirados = campanha.total_enviados ?? 0;
 
   return (
     <Link
@@ -220,11 +212,7 @@ function LinhaCampanha({ campanha }: { campanha: CampanhaResumo }) {
           ) : (
             <span>Público não gerado</span>
           )}
-          {enfileirados > 0 && (
-            <span>
-              {enfileirados} enfileirado{enfileirados === 1 ? "" : "s"}
-            </span>
-          )}
+          {campanha.agendado_para && <span>Agendada para {dataCampanha(campanha.agendado_para)}</span>}
           {campanha.aprovado_em && (
             <span>
               Aprovada em{" "}
@@ -232,6 +220,7 @@ function LinhaCampanha({ campanha }: { campanha: CampanhaResumo }) {
             </span>
           )}
         </div>
+        <div className="mt-2"><CampanhaContadores resumo={campanha.resumo} /></div>
       </div>
       <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
     </Link>

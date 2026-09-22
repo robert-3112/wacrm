@@ -4,7 +4,10 @@ import { __resetRateLimitForTests } from '@/lib/rate-limit'
 const mocks = vi.hoisted(() => ({
   requireConversationAccess: vi.fn(),
   pauseSophiaForHumanSend: vi.fn(),
+  readConversationWindow: vi.fn(),
 }))
+
+vi.mock('@/lib/whatsapp-oficial/conversation-window', () => ({ readConversationWindow: mocks.readConversationWindow }))
 
 vi.mock('@/lib/whatsapp-oficial/sophia-pause', () => ({
   pauseSophiaForHumanSend: mocks.pauseSophiaForHumanSend,
@@ -77,6 +80,8 @@ function authorizedContext(admin: ReturnType<typeof makeAdmin>) {
 
 describe('POST /api/whatsapp-oficial/messages/send', () => {
   beforeEach(() => {
+    mocks.readConversationWindow.mockReset()
+    mocks.readConversationWindow.mockResolvedValue({ applies: true, open: true })
     mocks.requireConversationAccess.mockReset()
     mocks.pauseSophiaForHumanSend.mockReset()
     mocks.pauseSophiaForHumanSend.mockResolvedValue({ sophia_pausada: false, in_flight_replies: 0 })
@@ -184,5 +189,26 @@ describe('POST /api/whatsapp-oficial/messages/send', () => {
     const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
     expect(res.status).toBe(500)
     expect(admin.rpc).not.toHaveBeenCalled()
+  })
+
+  it('rejects an expired window before pausing Sophia or queueing text', async () => {
+    const admin = makeAdmin()
+    mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
+    mocks.readConversationWindow.mockResolvedValue({ applies: true, open: false })
+    const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({ error: 'fora_da_janela_24h' })
+    expect(mocks.pauseSophiaForHumanSend).not.toHaveBeenCalled()
+    expect(admin.rpc).not.toHaveBeenCalled()
+  })
+
+  it('does not queue or pause when the window lookup fails', async () => {
+    const admin = makeAdmin()
+    mocks.requireConversationAccess.mockResolvedValue(authorizedContext(admin))
+    mocks.readConversationWindow.mockRejectedValue(new Error('window unavailable'))
+    const res = await POST(jsonRequest({ conversationId: 'conv-1', content: 'Oi!' }))
+    expect(res.status).toBe(500)
+    expect(admin.rpc).not.toHaveBeenCalled()
+    expect(mocks.pauseSophiaForHumanSend).not.toHaveBeenCalled()
   })
 })

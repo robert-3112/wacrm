@@ -38,6 +38,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { traduzirErro } from "@/lib/whatsapp-oficial/gestao-erros";
 import type { WhatsAppMessage, WhatsAppMessageStatus } from "@/types/whatsapp-oficial";
 
 function StatusIcon({ status }: { status: WhatsAppMessageStatus }) {
@@ -205,9 +206,9 @@ export function MessageBubble({ message }: { message: WhatsAppMessage }) {
           {isOutbound && <StatusIcon status={message.status} />}
         </div>
       </div>
-      {isOutbound && message.status === "falhou" && message.erro_detalhe && (
+      {isOutbound && message.status === "falhou" && (
         <span className="mt-0.5 max-w-[75%] text-[10px] text-destructive">
-          {message.erro_detalhe}
+          {traduzirErro(message.erro_detalhe || message.erro_code || "Não foi possível enviar esta mensagem.")}
         </span>
       )}
     </div>
