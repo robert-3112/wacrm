@@ -63,7 +63,7 @@ function makeAdmin(
   opts: {
     claimResult?: { ok: boolean; claimed?: OutboxJob[] }
     claimError?: unknown
-    messages?: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string }>
+    messages?: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string; enviado_por?: string | null; api_key_id?: string | null; message_type?: string }>
     missingMessageIds?: Set<string>
     recipients?: Record<string, Array<{ tenant_id: string; broadcast_id: string }>>
     broadcasts?: Record<string, { status: string; tenant_id: string; canal_id: string }>
@@ -71,6 +71,7 @@ function makeAdmin(
     channelCorretorId?: string | null
     leadCorretorIds?: Array<string | null>
     brokerActive?: boolean
+    actorAllowedResults?: boolean[]
     failSelectForTables?: Set<string>
     failUpdateForIds?: Set<string>
     lostClaimForIds?: Set<string>
@@ -81,7 +82,7 @@ function makeAdmin(
 ) {
   const calls: MockCall[] = []
   const rpcCalls: Array<Record<string, unknown>> = []
-  const messages: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string }> = { ...(opts.messages ?? {}) }
+  const messages: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string; enviado_por?: string | null; api_key_id?: string | null; message_type?: string }> = { ...(opts.messages ?? {}) }
   let channelReadCount = 0
   let leadReadCount = 0
 
@@ -90,6 +91,9 @@ function makeAdmin(
       rpcCalls.push(args)
       if (name === 'whatsapp_oficial_validar_envio_1a1') {
         return opts.manualPreflightResults?.shift() ?? { data: { ok: true }, error: null }
+      }
+      if (name === 'whatsapp_oficial_ator_pode_conversa') {
+        return { data: opts.actorAllowedResults?.shift() ?? true, error: null }
       }
       if (opts.claimError) return { data: null, error: opts.claimError }
       return { data: opts.claimResult ?? { ok: true, claimed: [] }, error: null }
@@ -166,6 +170,10 @@ function makeAdmin(
                 conversation_id: messages[id]?.conversation_id ?? 'conv-1',
                 direction: messages[id]?.direction ?? 'outbound',
                 status: messages[id]?.status ?? 'pendente',
+                enviado_por: messages[id]?.enviado_por === undefined ? 'user-1' : messages[id].enviado_por,
+                api_key_id: messages[id]?.api_key_id ?? null,
+                message_type: messages[id]?.message_type ??
+                  (opts.claimResult?.claimed?.find((job) => job.message_id === id)?.tipo === 'template' ? 'template' : 'text'),
               }, error: null }
             }
             if (table === 'whatsapp_broadcasts') {
@@ -315,6 +323,75 @@ describe('processOutboxBatch — shadow mode', () => {
 })
 
 describe('processOutboxBatch — broker channel ownership at send time', () => {
+  it.each([
+    ['missing linked message', { message_id: null, tipo: 'mensagem' }],
+    ['broadcast', { message_id: 'msg-1', tipo: 'broadcast' }],
+    ['unsupported kind', { message_id: 'msg-1', tipo: 'unknown' }],
+  ])('blocks broker-channel job with %s before provider contact', async (_case, overrides) => {
+    const job = makeJob(overrides as Partial<OutboxJob>)
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] }, channelCorretorId: 'broker-1',
+      recipients: { 'ob-1': [{ tenant_id: 't-1', broadcast_id: 'campaign-1' }] },
+      broadcasts: { 'campaign-1': { status: 'enviando', tenant_id: 't-1', canal_id: 'canal-1' } },
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_mensagem_sem_ator' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['missing actor', null, undefined],
+    ['actor no longer authorized', 'user-1', [false]],
+  ])('blocks broker-channel message with %s', async (_case, enviadoPor, actorAllowedResults) => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob()] }, channelCorretorId: 'broker-1',
+      messages: { 'msg-1': { status: 'pendente', enviado_por: enviadoPor } },
+      actorAllowedResults,
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_mensagem_sem_ator' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['API key source', makeJob(), { status: 'pendente', api_key_id: 'key-1' }],
+    ['text job linked to template', makeJob(), { status: 'pendente', message_type: 'template' }],
+    ['template job linked to text', makeJob({ tipo: 'template', payload: { template_name: 'hello_world' } }), { status: 'pendente', message_type: 'text' }],
+  ])('blocks broker-channel message with %s', async (_case, job, message) => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] }, channelCorretorId: 'broker-1',
+      messages: { 'msg-1': message },
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_mensagem_sem_ator' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('blocks authorization revoked while the credential was loading', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob()] }, channelCorretorId: 'broker-1',
+      actorAllowedResults: [true, false],
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_mensagem_sem_ator' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(loadChannelCredential).toHaveBeenCalledOnce()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
   it('dead-letters a broker-channel job after the lead moves to another broker', async () => {
     const { admin, calls } = makeAdmin({
       claimResult: { ok: true, claimed: [makeJob()] },

@@ -353,6 +353,35 @@ async function guardBrokerChannel(
   // Shared management channel (1266): retain its existing claim and consent rules.
   if (channel.corretor_id == null) return null
 
+  const block = async (reason: string): Promise<{ outcome: JobOutcome; bucket: Bucket }> => {
+    await deadLetterBlock(admin, flags, job, workerId, reason, now)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' }
+  }
+
+  // Broker channels are human 1:1 only. Campaigns and jobs without a linked
+  // outbound message cannot carry a verified human actor, even if the claim
+  // snapshot otherwise looks valid.
+  const actorReason = 'corretor_canal_mensagem_sem_ator'
+  if (!job.message_id || !job.conversation_id ||
+      (job.tipo !== 'mensagem' && job.tipo !== 'template')) return block(actorReason)
+  const { data: message, error: messageError } = await admin.from('whatsapp_messages')
+    .select('tenant_id,conversation_id,direction,enviado_por,api_key_id,message_type')
+    .eq('id', job.message_id).maybeSingle()
+  if (messageError) throw new Error('failed_to_revalidate_broker_actor')
+  const typeMatches = job.tipo === 'template'
+    ? message?.message_type === 'template'
+    : typeof message?.message_type === 'string' && message.message_type !== 'template'
+  if (!message || message.tenant_id !== job.tenant_id ||
+      message.conversation_id !== job.conversation_id || message.direction !== 'outbound' ||
+      !message.enviado_por || message.api_key_id !== null || !typeMatches) return block(actorReason)
+  const { data: actorAllowed, error: actorError } = await admin.rpc('whatsapp_oficial_ator_pode_conversa', {
+    p_actor_user_id: message.enviado_por,
+    p_conversation_id: job.conversation_id,
+  })
+  if (actorError) throw new Error('failed_to_revalidate_broker_actor')
+  if (actorAllowed !== true) return block(actorReason)
+
   const [leadResult, brokerResult] = await Promise.all([
     job.lead_id
       ? admin.from('leads').select('tenant_id,corretor_id').eq('id', job.lead_id).maybeSingle()
@@ -366,10 +395,7 @@ async function guardBrokerChannel(
     return null
   }
 
-  const reason = 'corretor_canal_ou_lead_alterado'
-  await deadLetterBlock(admin, flags, job, workerId, reason, now)
-  await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
-  return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' }
+  return block('corretor_canal_ou_lead_alterado')
 }
 
 type CampaignState = 'active' | 'paused' | 'cancelled' | 'invalid'
