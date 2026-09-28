@@ -38,17 +38,14 @@ import {
  *
  * Gate de papel em DUAS camadas, e as duas importam:
  *
- *  1. O pré-check de RLS abaixo (`whatsapp_channels_select_gestao`, que é
- *     `tenant_id` + `crm_is_gestao()`) barra ANTES de decifrar o token e antes
- *     de gastar a cota da Business Management API do WABA. Ele não é
- *     redundante com a camada 2: é o único que impede um chamador sem papel de
- *     provocar a decifra da credencial e 20 requisições à Meta.
+ *  1. `crm_is_admin_gestor()` com a sessão barra corretor e líder ANTES de
+ *     decifrar o token ou gastar a cota da Business Management API. A RLS do
+ *     canal confirma em seguida que ele pertence ao tenant da sessão; a RLS
+ *     também permite ao corretor ver o próprio canal, então não basta sozinha.
  *  2. `whatsapp_oficial_sync_templates` recebe `p_actor_user_id` e é a
  *     AUTORIDADE de papel: só owner/admin/gestor passam por
- *     `whatsapp_campanha_ator_autorizado`; qualquer outro leva 42501. Isso
- *     fecha a fresta que a camada 1 deixa: `crm_is_gestao()` inclui `lider`,
- *     então um líder ENXERGA o canal pela RLS e chega até aqui — quem o recusa
- *     é o Postgres, e a rota traduz esse 42501 para 403 (não 500).
+ *     `whatsapp_campanha_ator_autorizado`; qualquer outro leva 42501. A rota
+ *     traduz esse 42501 para 403 em caso de mudança de papel durante o sync.
  *
  * A versão de 4 argumentos da RPC foi dropada em produção: chamar sem
  * `p_actor_user_id` devolve "function does not exist".
@@ -112,9 +109,12 @@ export async function POST(request: Request): Promise<Response> {
     )
     if (!rl.success) return rateLimitResponse(rl)
 
-    // Gate de papel (ver docblock): a RLS de `whatsapp_channels` só devolve
-    // linha para gestão do tenant. Miss = 404, indistinguível de canal
-    // inexistente — um corretor não descobre por aqui quais canais existem.
+    const { data: isAdminGestor, error: roleError } = await supabaseUser.rpc('crm_is_admin_gestor')
+    if (roleError) return NextResponse.json({ error: 'role_lookup_failed' }, { status: 500 })
+    if (isAdminGestor !== true) return NextResponse.json({ error: 'sem_permissao' }, { status: 403 })
+
+    // Confirma a visibilidade do canal dentro do tenant da sessão. Miss = 404,
+    // indistinguível de canal inexistente ou de outro tenant.
     const { data: canalVisivel, error: rlsError } = await supabaseUser
       .from('whatsapp_channels')
       .select('id')
@@ -232,8 +232,7 @@ export async function POST(request: Request): Promise<Response> {
       // de qualquer log.
       const detalhe = redigirToken(error.message, accessToken)
       // 42501 = a RPC recusou o ATOR (papel insuficiente). Sem esta linha um
-      // `lider`, que passa pela RLS de canais via `crm_is_gestao()` e portanto
-      // chega até aqui, leria "erro do servidor" em vez de "você não pode".
+      // Se o papel mudou depois do pré-check, uma recusa da RPC ainda é 403.
       if (isPostgrestPermissionError(error)) {
         console.error('[whatsapp-oficial/templates/sync] sync RPC denied:', detalhe)
         return NextResponse.json({ error: 'sem_permissao' }, { status: 403 })
