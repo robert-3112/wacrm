@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { supabaseAdmin } from '@/lib/whatsapp-oficial/supabase-admin'
+import { requireConversationAccess, toErrorResponse } from '@/lib/whatsapp-oficial/api-auth'
 import { decryptToken } from '@/lib/whatsapp-oficial/crypto'
 import { downloadMedia, getMediaUrl } from '@/lib/whatsapp-oficial/meta-api'
 import {
@@ -18,16 +18,13 @@ import {
  *
  * D10 (ADR-WHATSAPP-OFFICIAL-WACRM): the Meta access token is never sent
  * to the browser. Two Supabase clients are used deliberately:
- *   1. A user-scoped client (cookies + anon key) to look up the message —
- *      RLS on `whatsapp_messages` (gestão sees everything; a corretor only
- *      the leads they own) does the authorization check for us, for free.
+ *   1. A user-scoped client (cookies + anon key) to look up the message, then
+ *      `requireConversationAccess` to verify the channel and lead together.
  *      A `maybeSingle()` miss means "doesn't exist OR you can't see it" —
  *      same 404 either way, no information leak about other tenants'
  *      conversations.
- *   2. A service-role client to resolve the channel + decrypt its token —
- *      `whatsapp_channels` RLS restricts SELECT to gestão, and an
- *      individual corretor legitimately viewing their own conversation's
- *      media must still be able to trigger a Meta download.
+ *   2. A service-role client, obtained only after that check, to decrypt the
+ *      channel token for a legitimate conversation's Meta download.
  */
 export async function GET(
   request: Request,
@@ -66,19 +63,15 @@ export async function GET(
     return NextResponse.json({ error: 'Media not found' }, { status: 404 })
   }
 
-  const admin = supabaseAdmin()
-  const { data: conversation, error: conversationError } = await admin
-    .from('whatsapp_conversations')
-    .select('canal_id')
-    .eq('id', message.conversation_id as string)
-    .eq('tenant_id', message.tenant_id as string)
-    .maybeSingle()
-  if (conversationError || !conversation) {
-    console.error(
-      '[whatsapp-oficial/media] failed to resolve conversation/channel:',
-      conversationError?.message,
-    )
-    return NextResponse.json({ error: 'Failed to fetch media' }, { status: 500 })
+  let access: Awaited<ReturnType<typeof requireConversationAccess>>
+  try {
+    access = await requireConversationAccess(message.conversation_id as string)
+  } catch (error) {
+    return toErrorResponse(error)
+  }
+  const { conversation, admin } = access
+  if (conversation.id !== message.conversation_id || conversation.tenant_id !== message.tenant_id) {
+    return NextResponse.json({ error: 'Media not found' }, { status: 404 })
   }
 
   const { data: channel, error: channelError } = await admin

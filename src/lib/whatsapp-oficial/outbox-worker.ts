@@ -336,6 +336,42 @@ async function channelIsActive(admin: SupabaseClient, job: OutboxJob): Promise<b
   return data.status === 'ativo'
 }
 
+/** A claim contains a snapshot. For broker-owned channels, a lead transfer or
+ * broker deactivation after enqueue must stop the old channel from sending. */
+async function guardBrokerChannel(
+  admin: SupabaseClient,
+  flags: WhatsappFlags,
+  workerId: string,
+  job: OutboxJob,
+  now: Date,
+): Promise<{ outcome: JobOutcome; bucket: Bucket } | null> {
+  const { data: channel, error: channelError } = await admin.from('whatsapp_channels')
+    .select('tenant_id,corretor_id').eq('id', job.canal_id).maybeSingle()
+  if (channelError || !channel || channel.tenant_id !== job.tenant_id) {
+    throw new Error('failed_to_revalidate_broker_channel')
+  }
+  // Shared management channel (1266): retain its existing claim and consent rules.
+  if (channel.corretor_id == null) return null
+
+  const [leadResult, brokerResult] = await Promise.all([
+    job.lead_id
+      ? admin.from('leads').select('tenant_id,corretor_id').eq('id', job.lead_id).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    admin.from('corretores').select('tenant_id,ativo').eq('id', channel.corretor_id).maybeSingle(),
+  ])
+  if (leadResult.error || brokerResult.error) throw new Error('failed_to_revalidate_broker_channel')
+  if (leadResult.data?.tenant_id === job.tenant_id &&
+      leadResult.data.corretor_id === channel.corretor_id &&
+      brokerResult.data?.tenant_id === job.tenant_id && brokerResult.data.ativo === true) {
+    return null
+  }
+
+  const reason = 'corretor_canal_ou_lead_alterado'
+  await deadLetterBlock(admin, flags, job, workerId, reason, now)
+  await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
+  return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' }
+}
+
 type CampaignState = 'active' | 'paused' | 'cancelled' | 'invalid'
 
 /** The recipient relation is authoritative: an outbox payload alone cannot identify its campaign. */
@@ -532,6 +568,9 @@ async function handleJob(
   const manualConsentBlock = await guardManualConsent(admin, flags, workerId, job, now)
   if (manualConsentBlock) return manualConsentBlock
 
+  const brokerBlock = await guardBrokerChannel(admin, flags, workerId, job, now)
+  if (brokerBlock) return brokerBlock
+
   // f) live — the ONLY branch that reads a credential or calls a provider.
   let credential: string
   try {
@@ -568,6 +607,9 @@ async function handleJob(
 
   const finalManualConsentBlock = await guardManualConsent(admin, flags, workerId, job, clock())
   if (finalManualConsentBlock) return finalManualConsentBlock
+
+  const finalBrokerBlock = await guardBrokerChannel(admin, flags, workerId, job, clock())
+  if (finalBrokerBlock) return finalBrokerBlock
 
   let providerMessageId: string
   try {

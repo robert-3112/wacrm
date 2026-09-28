@@ -10,13 +10,10 @@
  *
  *   1. A user-scoped client (`@/lib/supabase/server`, cookies + anon key) is
  *      used ONLY to check whether the caller can currently SELECT the
- *      conversation. `whatsapp_conversations` RLS already encodes exactly
- *      the rule we need (gestão sees the whole tenant; a corretor only
- *      conversations for leads they own — ADR D10: "checa RLS de
- *      whatsapp_conversations, só o corretor dono ou gestão"), so this is
- *      the WHOLE authorization check. A `maybeSingle()` miss means "doesn't
- *      exist OR you can't see it" — same 404 either way, no information
- *      leak about other corretors' conversations.
+ *      conversation. For a broker, the same session also confirms that both
+ *      the lead and channel belong to that active broker in the same tenant.
+ *      A `maybeSingle()` miss means "doesn't exist OR you can't see it" —
+ *      same 404 either way, with no information leak.
  *   2. Once authorized, the route uses the service-role client
  *      (`supabaseAdmin()`) to perform the actual write — these tables have
  *      no INSERT/UPDATE/DELETE policy at all yet (ADR D5/D10), so a
@@ -173,6 +170,43 @@ export async function requireConversationAccess(
   }
   if (!conversation) {
     throw new NotFoundError('Conversation not found')
+  }
+
+  // A conversation SELECT alone is insufficient on installations that still
+  // have the legacy lead-only RLS policy. A broker must own the lead and the
+  // channel, or pass the database's narrow shared/default-channel gate.
+  // The database write RPC/trigger must independently recheck against races.
+  const { data: isGestao, error: roleError } = await supabaseUser.rpc('crm_is_gestao')
+  if (roleError) throw new NotFoundError()
+  if (isGestao !== true) {
+    const { data: brokerId, error: brokerError } = await supabaseUser.rpc('crm_current_corretor_id')
+    if (brokerError || !brokerId) throw new NotFoundError()
+
+    const [leadResult, channelResult] = await Promise.all([
+      supabaseUser.from('leads').select('id,tenant_id,corretor_id')
+        .eq('id', conversation.lead_id).maybeSingle(),
+      supabaseUser.from('whatsapp_channels').select('id,tenant_id,corretor_id')
+        .eq('id', conversation.canal_id).maybeSingle(),
+    ])
+    const lead = leadResult.data
+    const channel = channelResult.data
+    if (leadResult.error || channelResult.error ||
+        lead?.id !== conversation.lead_id || lead?.tenant_id !== conversation.tenant_id ||
+        lead?.corretor_id !== brokerId) {
+      throw new NotFoundError()
+    }
+    if (channel) {
+      if (channel.id !== conversation.canal_id || channel.tenant_id !== conversation.tenant_id ||
+          channel.corretor_id !== brokerId) throw new NotFoundError()
+    } else {
+      // The 1266 default channel is intentionally hidden from a broker's
+      // direct channel SELECT. This session-scoped RPC verifies the same lead,
+      // active broker, tenant, and (corretor_id IS NULL AND is_default TRUE).
+      const { data: sharedAllowed, error: sharedError } = await supabaseUser.rpc(
+        'whatsapp_oficial_corretor_pode_ler_conversa', { p_conversation_id: conversation.id },
+      )
+      if (sharedError || sharedAllowed !== true) throw new NotFoundError()
+    }
   }
 
   return {

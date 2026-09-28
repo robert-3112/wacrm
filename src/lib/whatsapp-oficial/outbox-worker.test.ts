@@ -68,6 +68,9 @@ function makeAdmin(
     recipients?: Record<string, Array<{ tenant_id: string; broadcast_id: string }>>
     broadcasts?: Record<string, { status: string; tenant_id: string; canal_id: string }>
     channelStatuses?: Array<'ativo' | 'inativo' | 'pausado'>
+    channelCorretorId?: string | null
+    leadCorretorIds?: Array<string | null>
+    brokerActive?: boolean
     failSelectForTables?: Set<string>
     failUpdateForIds?: Set<string>
     lostClaimForIds?: Set<string>
@@ -80,6 +83,7 @@ function makeAdmin(
   const rpcCalls: Array<Record<string, unknown>> = []
   const messages: Record<string, { status: string; tenant_id?: string; conversation_id?: string; direction?: string }> = { ...(opts.messages ?? {}) }
   let channelReadCount = 0
+  let leadReadCount = 0
 
   const admin = {
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -169,9 +173,15 @@ function makeAdmin(
             }
             if (table === 'whatsapp_channels') {
               return {
-                data: { tenant_id: 't-1', status: opts.channelStatuses?.[channelReadCount++] ?? 'ativo' },
+                data: { tenant_id: 't-1', status: opts.channelStatuses?.[channelReadCount++] ?? 'ativo', corretor_id: opts.channelCorretorId ?? null },
                 error: null,
               }
+            }
+            if (table === 'leads') {
+              return { data: { tenant_id: 't-1', corretor_id: opts.leadCorretorIds?.[leadReadCount++] ?? 'broker-1' }, error: null }
+            }
+            if (table === 'corretores') {
+              return { data: { tenant_id: 't-1', ativo: opts.brokerActive ?? true }, error: null }
             }
             return { data: null, error: null }
           },
@@ -301,6 +311,51 @@ describe('processOutboxBatch — shadow mode', () => {
     expect(adapterMock.send).not.toHaveBeenCalled()
     expect(loadChannelCredential).not.toHaveBeenCalled()
     expect(auditInserts(calls)[0].values).toMatchObject({ motivo: 'provider_send_desabilitado' })
+  })
+})
+
+describe('processOutboxBatch — broker channel ownership at send time', () => {
+  it('dead-letters a broker-channel job after the lead moves to another broker', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob()] },
+      channelCorretorId: 'broker-1',
+      leadCorretorIds: ['broker-2'],
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_ou_lead_alterado' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('rechecks after credential loading and blocks a lead transfer before provider contact', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob()] },
+      channelCorretorId: 'broker-1',
+      leadCorretorIds: ['broker-1', 'broker-2'],
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_ou_lead_alterado' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(loadChannelCredential).toHaveBeenCalledOnce()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('blocks a broker-channel job when its broker is inactive', async () => {
+    const { admin } = makeAdmin({
+      claimResult: { ok: true, claimed: [makeJob()] },
+      channelCorretorId: 'broker-1', brokerActive: false,
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_ou_lead_alterado' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
   })
 })
 
