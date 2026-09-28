@@ -73,6 +73,7 @@ function makeAdmin(
     lostClaimForIds?: Set<string>
     unconfirmedUpdateForIds?: Set<string>
     beforeMessageUpdate?: () => void
+    manualPreflightResults?: Array<{ data: { ok: boolean; reason?: string } | null; error: { message: string } | null }>
   } = {},
 ) {
   const calls: MockCall[] = []
@@ -81,8 +82,11 @@ function makeAdmin(
   let channelReadCount = 0
 
   const admin = {
-    rpc: async (_name: string, args: Record<string, unknown>) => {
+    rpc: async (name: string, args: Record<string, unknown>) => {
       rpcCalls.push(args)
+      if (name === 'whatsapp_oficial_validar_envio_1a1') {
+        return opts.manualPreflightResults?.shift() ?? { data: { ok: true }, error: null }
+      }
       if (opts.claimError) return { data: null, error: opts.claimError }
       return { data: opts.claimResult ?? { ok: true, claimed: [] }, error: null }
     },
@@ -297,6 +301,102 @@ describe('processOutboxBatch — shadow mode', () => {
     expect(adapterMock.send).not.toHaveBeenCalled()
     expect(loadChannelCredential).not.toHaveBeenCalled()
     expect(auditInserts(calls)[0].values).toMatchObject({ motivo: 'provider_send_desabilitado' })
+  })
+})
+
+describe('processOutboxBatch — manual 1:1 consent at send time', () => {
+  const manualJob = () => makeJob({
+    tipo: 'template',
+    payload: { template_name: 'hello_world', hub_origin: 'manual_init_1a1' },
+  })
+  it('sends a tagged job only after two fresh database preflight checks', async () => {
+    const job = manualJob()
+    const { admin, rpcCalls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    vi.mocked(adapterMock.send).mockResolvedValue({ providerMessageId: 'wamid.MANUAL' })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.sent).toBe(1)
+    expect(adapterMock.send).toHaveBeenCalledOnce()
+    expect(rpcCalls.filter((args) => args.p_lead_id === 'lead-1')).toEqual([
+      { p_lead_id: 'lead-1', p_tenant_id: 't-1', p_expected_whatsapp: job.lead_whatsapp },
+      { p_lead_id: 'lead-1', p_tenant_id: 't-1', p_expected_whatsapp: job.lead_whatsapp },
+    ])
+  })
+
+  it('dead-letters a tagged job when consent is absent before reading credentials', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [manualJob()] },
+      manualPreflightResults: [{ data: { ok: false, reason: 'consentimento_ausente' }, error: null }],
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'consentimento_ausente' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto', last_error_code: 'consentimento_ausente' })
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('dead-letters when another CRM lead with the same phone opts out', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [manualJob()] },
+      manualPreflightResults: [{ data: { ok: false, reason: 'destinatario_optout_duplicado' }, error: null }],
+    })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'destinatario_optout_duplicado' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('catches a phone change committed while credential loading was in flight', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [manualJob()] },
+      manualPreflightResults: [
+        { data: { ok: true }, error: null },
+        { data: { ok: false, reason: 'destinatario_alterado' }, error: null },
+      ],
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'destinatario_alterado' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it.each(['error', 'invalid_response'])(
+    'fails closed and requeues without provider contact if the preflight has %s',
+    async (failure) => {
+      const { admin, calls } = makeAdmin({
+        claimResult: { ok: true, claimed: [manualJob()] },
+        manualPreflightResults: [failure === 'error'
+          ? { data: null, error: { message: 'read failed' } }
+          : { data: null, error: null }],
+      })
+
+      const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+
+      expect(result.outcomes[0]).toMatchObject({ decision: 'reenfileirado', reason: 'falha_pre_envio' })
+      expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente' })
+      expect(loadChannelCredential).not.toHaveBeenCalled()
+      expect(adapterMock.send).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps tagged jobs in shadow without consent reads, credentials or provider contact', async () => {
+    const { admin, rpcCalls } = makeAdmin({ claimResult: { ok: true, claimed: [manualJob()] } })
+
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'shadow' }), workerId: 'w1' })
+
+    expect(result.simulated).toBe(1)
+    expect(rpcCalls.filter((args) => args.p_lead_id === 'lead-1')).toHaveLength(0)
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
   })
 })
 

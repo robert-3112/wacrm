@@ -32,6 +32,15 @@ import type { CampanhaStatus, TemplateStatusAprovacao } from '@/types/whatsapp-o
 const MENSAGENS: Record<string, string> = {
   fora_da_janela_24h: 'A janela de 24 horas terminou. Use um template aprovado ou aguarde uma nova mensagem do contato.',
   destinatario_fora_allowlist: 'Este destinatário ainda não está autorizado no piloto.',
+  piloto_nao_configurado: 'O canal de teste ainda não está liberado neste ambiente.',
+  consentimento_ausente: 'Este contato ainda não tem consentimento válido registrado para uma primeira mensagem.',
+  consentimento_revogado: 'Este contato revogou o consentimento e não pode receber mensagens.',
+  idempotency_conflict: 'Esta solicitação já foi usada com outro conteúdo. Atualize a página e confira a conversa antes de repetir.',
+  telefone_invalido: 'O WhatsApp deste contato está inválido no CRM. Corrija-o antes de iniciar a conversa.',
+  lead_nao_encontrado: 'Contato não encontrado ou indisponível para sua conta.',
+  cooldown_24h: 'Já existe uma tentativa de envio para esta conta nas últimas 24 horas. Confira a conversa e os recibos antes de tentar novamente.',
+  destinatario_optout_duplicado: 'Este número está associado a outro contato que pediu para não receber mensagens.',
+  sophia_resposta_em_transito: 'A Sophia está concluindo uma resposta neste contato. Aguarde e confira a conversa antes de enviar.',
   // -- api-auth / toErrorResponse -------------------------------------------
   Unauthorized: 'Sessão expirada. Entre novamente para continuar.',
   Forbidden: 'Seu usuário não tem papel de gestão para executar esta ação.',

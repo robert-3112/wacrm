@@ -296,6 +296,34 @@ const CAMPAIGN_INVALID_REQUEUE_DELAY_S = 3600
 const PREFLIGHT_REQUEUE_DELAY_S = 300
 const CHANNEL_REQUEUE_DELAY_S = 300
 
+/** Revalidate only the 1:1 jobs initiated by the Hub; legacy queue paths keep their existing rules. */
+async function guardManualConsent(
+  admin: SupabaseClient,
+  flags: WhatsappFlags,
+  workerId: string,
+  job: OutboxJob,
+  now: Date,
+): Promise<{ outcome: JobOutcome; bucket: Bucket } | null> {
+  if (job.payload?.hub_origin !== 'manual_init_1a1') return null
+
+  if (!job.lead_id || !job.lead_whatsapp) throw new Error('manual_job_missing_recipient')
+  const { data, error } = await admin.rpc('whatsapp_oficial_validar_envio_1a1', {
+    p_lead_id: job.lead_id,
+    p_tenant_id: job.tenant_id,
+    p_expected_whatsapp: job.lead_whatsapp,
+  })
+  if (error || !data || typeof data !== 'object' || typeof data.ok !== 'boolean') {
+    throw new Error('failed_to_revalidate_manual_send')
+  }
+  const reason = data.ok === false && typeof data.reason === 'string' ? data.reason : null
+  if (data.ok === false && !reason) throw new Error('invalid_manual_send_preflight')
+
+  if (!reason) return null
+  await deadLetterBlock(admin, flags, job, workerId, reason, now)
+  await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
+  return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' }
+}
+
 /** Recheck the channel after a claim and just before provider I/O. A pause
  * racing with claim must preserve the queued message, not dead-letter it. */
 async function channelIsActive(admin: SupabaseClient, job: OutboxJob): Promise<boolean> {
@@ -501,6 +529,9 @@ async function handleJob(
     }
   }
 
+  const manualConsentBlock = await guardManualConsent(admin, flags, workerId, job, now)
+  if (manualConsentBlock) return manualConsentBlock
+
   // f) live — the ONLY branch that reads a credential or calls a provider.
   let credential: string
   try {
@@ -534,6 +565,9 @@ async function handleJob(
     await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'canal_pausado' })
     return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
   }
+
+  const finalManualConsentBlock = await guardManualConsent(admin, flags, workerId, job, clock())
+  if (finalManualConsentBlock) return finalManualConsentBlock
 
   let providerMessageId: string
   try {

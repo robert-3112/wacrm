@@ -28,6 +28,7 @@ describe('contatos do Hub', () => {
       id: 'lead-1',
       nome: 'Ana',
       telefone: '5547999990000',
+      whatsapp: null,
       etapa: 'novo',
       temCorretor: false,
     });
@@ -51,6 +52,7 @@ describe('contatos do Hub', () => {
     });
 
     expect(contact.corretorNome).toBe('Equipe Norte');
+    expect(contact.whatsapp).toBe('5547999991111');
   });
 
   it('não permite que a busca altere a sintaxe do filtro PostgREST', () => {

@@ -77,6 +77,8 @@ export type HubContact = {
   id: string;
   nome: string;
   telefone: string | null;
+  /** O envio oficial usa apenas leads.whatsapp, nunca o telefone alternativo. */
+  whatsapp: string | null;
   email: string | null;
   cidade: string | null;
   etapa: string | null;
@@ -93,6 +95,7 @@ export function normalizeContactRow(row: RawContactRow): HubContact {
     id: row.id,
     nome: row.nome?.trim() || row.name?.trim() || 'Sem nome',
     telefone: row.whatsapp?.trim() || row.phone?.trim() || null,
+    whatsapp: row.whatsapp?.trim() || null,
     email: row.email?.trim() || null,
     cidade: row.city?.trim() || null,
     etapa: row.etapa,
