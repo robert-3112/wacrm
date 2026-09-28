@@ -517,6 +517,13 @@ function metaStatusPayload(status: { id: string; status: string; timestamp?: str
   })
 }
 
+function metaFieldPayload(field: string, value: Record<string, unknown>) {
+  return JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [{ id: CHANNEL.waba_id, changes: [{ field, value }] }],
+  })
+}
+
 /**
  * Evento de lifecycle de template. `value` NÃO tem metadata/phone_number_id —
  * é outra forma de payload, e `entry.id` é o WABA id.
@@ -592,6 +599,202 @@ describe('POST /api/whatsapp-oficial/webhook — signature verification', () => 
     } finally {
       process.env.META_APP_SECRET = original
     }
+  })
+})
+
+describe('POST /api/whatsapp-oficial/webhook — Coexistence fields stay out of inbound', () => {
+  const metadata = {
+    display_phone_number: '15550783881',
+    phone_number_id: CHANNEL.phone_number_id,
+  }
+
+  it('quarantines Business App echoes durably and deduplicates a Meta redelivery', async () => {
+    const body = metaFieldPayload('smb_message_echoes', {
+      messaging_product: 'whatsapp',
+      metadata,
+      message_echoes: [
+        {
+          from: '15550783881',
+          to: LEAD.whatsapp,
+          id: 'wamid.ECHO1',
+          timestamp: '1700255121',
+          type: 'text',
+          text: { body: 'reply from WhatsApp Business app' },
+        },
+      ],
+    })
+
+    expect((await postWebhook(body)).status).toBe(200)
+    expect((await postWebhook(body)).status).toBe(200)
+    expect(fakeDb.state.messages).toHaveLength(0)
+    expect(fakeDb.state.conversations).toHaveLength(0)
+    expect(fakeDb.state.leads).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents[0]).toMatchObject({
+      canal_id: CHANNEL.id,
+      event_type: 'unknown',
+      processed_at: null,
+      payload: { field: 'smb_message_echoes', waba_id: CHANNEL.waba_id },
+    })
+  })
+
+  it('quarantines history with messages in both directions without importing them as new inbound', async () => {
+    const body = metaFieldPayload('history', {
+      messaging_product: 'whatsapp',
+      metadata,
+      history: [
+        {
+          metadata: { phase: 0, chunk_order: 1, progress: 55 },
+          threads: [
+            {
+              id: LEAD.whatsapp,
+              messages: [
+                {
+                  id: 'wamid.HISTOUT',
+                  from: '15550783881',
+                  timestamp: '1739230955',
+                  type: 'text',
+                  text: { body: 'out' },
+                },
+                {
+                  id: 'wamid.HISTIN',
+                  from: LEAD.whatsapp,
+                  timestamp: '1739230970',
+                  type: 'text',
+                  text: { body: 'in' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    expect((await postWebhook(body)).status).toBe(200)
+    expect(fakeDb.state.messages).toHaveLength(0)
+    expect(fakeDb.state.webhookEvents[0]).toMatchObject({
+      event_type: 'unknown',
+      processed_at: null,
+      payload: { field: 'history' },
+    })
+  })
+
+  it('quarantines state sync as account_update without creating a lead', async () => {
+    const body = metaFieldPayload('smb_app_state_sync', {
+      messaging_product: 'whatsapp',
+      metadata,
+      state_sync: [
+        {
+          type: 'contact',
+          contact: { full_name: 'Pablo', phone_number: LEAD.whatsapp },
+          action: 'add',
+          metadata: { timestamp: '1738346006' },
+        },
+      ],
+    })
+
+    expect((await postWebhook(body)).status).toBe(200)
+    expect(fakeDb.state.leads).toHaveLength(1)
+    expect(fakeDb.state.messages).toHaveLength(0)
+    expect(fakeDb.state.webhookEvents[0]).toMatchObject({
+      event_type: 'account_update',
+      processed_at: null,
+      payload: { field: 'smb_app_state_sync' },
+    })
+  })
+
+  it('does not route an unknown field with a messages-shaped value into inbound', async () => {
+    const body = metaFieldPayload('future_meta_field', {
+      messaging_product: 'whatsapp',
+      metadata,
+      messages: [
+        {
+          id: 'wamid.UNKNOWN',
+          from: LEAD.whatsapp,
+          timestamp: '1700000000',
+          type: 'text',
+          text: { body: 'hello' },
+        },
+      ],
+    })
+
+    expect((await postWebhook(body)).status).toBe(200)
+    expect(fakeDb.state.messages).toHaveLength(0)
+    expect(fakeDb.state.webhookEvents[0]).toMatchObject({
+      event_type: 'unknown',
+      processed_at: null,
+    })
+  })
+
+  it('asks Meta to retry when an unintegrated field cannot be assigned to a channel', async () => {
+    fakeDb.state.channels.length = 0
+    const body = metaFieldPayload('smb_message_echoes', {
+      metadata,
+      message_echoes: [],
+    })
+
+    expect((await postWebhook(body)).status).toBe(503)
+    expect(fakeDb.state.webhookEvents).toHaveLength(0)
+    fakeDb.state.channels.push({ ...CHANNEL })
+    expect((await postWebhook(body)).status).toBe(200)
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+  })
+
+  it('rejects a phone_number_id whose WABA does not match entry.id', async () => {
+    const body = JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [{
+        id: 'WABA-OTHER',
+        changes: [{ field: 'smb_message_echoes', value: { metadata, message_echoes: [] } }],
+      }],
+    })
+
+    expect((await postWebhook(body)).status).toBe(503)
+    expect(fakeDb.state.webhookEvents).toHaveLength(0)
+
+    fakeDb.state.channels[0].waba_id = 'WABA-OTHER'
+    expect((await postWebhook(body)).status).toBe(200)
+    expect(fakeDb.state.webhookEvents).toHaveLength(1)
+    expect(fakeDb.state.webhookEvents[0].canal_id).toBe(CHANNEL.id)
+  })
+
+  it('does not guess a channel for a WABA-level field without phone_number_id', async () => {
+    fakeDb.state.channels.push({ ...CHANNEL, id: 'chan-2', phone_number_id: 'PNID-2' })
+    const body = metaFieldPayload('future_account_field', { state: 'changed' })
+
+    expect((await postWebhook(body)).status).toBe(503)
+    expect(fakeDb.state.webhookEvents).toHaveLength(0)
+  })
+
+  it('processes a normal inbound message beside an echo in the same batch', async () => {
+    const inbound = JSON.parse(metaTextPayload()).entry[0].changes[0]
+    const echo = JSON.parse(
+      metaFieldPayload('smb_message_echoes', {
+        metadata,
+        message_echoes: [
+          {
+            id: 'wamid.ECHO2',
+            from: '15550783881',
+            to: LEAD.whatsapp,
+            timestamp: '1700255121',
+            type: 'text',
+            text: { body: 'out' },
+          },
+        ],
+      })
+    ).entry[0].changes[0]
+    const body = JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [{ id: CHANNEL.waba_id, changes: [echo, inbound] }],
+    })
+
+    expect((await postWebhook(body)).status).toBe(200)
+    expect(fakeDb.state.messages.map((message) => message.wamid)).toEqual([
+      'wamid.MSG1',
+    ])
+    expect(
+      fakeDb.state.webhookEvents.map((event) => event.event_type).sort()
+    ).toEqual(['message', 'unknown'])
   })
 })
 
