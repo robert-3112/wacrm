@@ -229,6 +229,11 @@ export function TravasSaidaPainel({
             detalhe="Quando ligado, limita o envio aos destinatários autorizados do teste."
           />
         </ul>
+        <p className="mt-3 text-xs text-muted-foreground">
+          O agendador de campanhas é um serviço separado e não tem estado
+          verificado nesta tela. Aprovação e travas ligadas não comprovam que
+          ele esteja executando; acompanhe os contadores após o horário marcado.
+        </p>
         {!broadcastLiberado && (
           <p className="mt-3 flex items-start gap-1.5 text-xs">
             <Info className="mt-0.5 size-3.5 shrink-0" />

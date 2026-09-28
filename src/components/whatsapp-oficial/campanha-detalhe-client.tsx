@@ -199,6 +199,10 @@ export function CampanhaDetalheClient({
   };
 
   const handleMaterializar = async () => {
+    if (!ultimaSimulacao || limiteInvalido) {
+      setErroPublico("Rode uma nova simulação com o limite atual antes de gravar o público.");
+      return;
+    }
     setConfirmarMaterializar(false);
     setMaterializando(true);
     setErroPublico(null);
@@ -314,9 +318,14 @@ export function CampanhaDetalheClient({
         simulando={simulando}
         materializando={materializando}
         limite={limite}
+        limiteNumero={limiteNumero}
         limiteInvalido={limiteInvalido}
         erro={erroPublico}
-        onLimiteChange={setLimite}
+        onLimiteChange={(valor) => {
+          setLimite(valor);
+          setUltimaSimulacao(null);
+          setUltimaSimulacaoEm(null);
+        }}
         onSimular={() => void handleSimular()}
         onMaterializar={() => setConfirmarMaterializar(true)}
       />
@@ -427,23 +436,29 @@ export function CampanhaDetalheClient({
           </DialogHeader>
           <div className="space-y-2 text-sm">
             <p>
-              Último cálculo:{" "}
-              <strong className="text-foreground">{publico.elegiveis}</strong> elegível(is) e{" "}
-              <strong className="text-foreground">{publico.suprimidos}</strong> suprimido(s).
+              Simulação atual:{" "}
+              <strong className="text-foreground">{ultimaSimulacao?.elegiveis ?? 0}</strong>{" "}
+              elegível(is) e{" "}
+              <strong className="text-foreground">{ultimaSimulacao?.suprimidos ?? 0}</strong>{" "}
+              suprimido(s).
             </p>
             {limiteNumero !== null && (
               <p className="text-muted-foreground">Limite aplicado: {limiteNumero}.</p>
             )}
             <p className="text-muted-foreground">
-              Gravar não envia nada: a campanha continua precisando de aprovação, e o envio ainda
-              depende dos kill switches.
+              O público será recalculado ao gravar, então os totais podem mudar se os contatos
+              mudaram desde esta simulação. Gravar não envia nada: a campanha continua precisando
+              de aprovação e das travas de saída.
             </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmarMaterializar(false)}>
               Voltar
             </Button>
-            <Button onClick={() => void handleMaterializar()}>
+            <Button
+              disabled={!ultimaSimulacao || materializando}
+              onClick={() => void handleMaterializar()}
+            >
               <Database data-icon="inline-start" />
               Gravar público
             </Button>
@@ -556,6 +571,7 @@ function PainelPublico({
   simulando,
   materializando,
   limite,
+  limiteNumero,
   limiteInvalido,
   erro,
   onLimiteChange,
@@ -570,6 +586,7 @@ function PainelPublico({
   simulando: boolean;
   materializando: boolean;
   limite: string;
+  limiteNumero: number | null;
   limiteInvalido: boolean;
   erro: string | null;
   onLimiteChange: (v: string) => void;
@@ -585,6 +602,7 @@ function PainelPublico({
   const suprimidos = ultimaSimulacao ? ultimaSimulacao.suprimidos : publico.suprimidos;
   const totalAvaliado = elegiveis + suprimidos;
   const fonte = ultimaSimulacao ? "dry_run" : publico.fonte;
+  const limiteAplicado = ultimaSimulacao ? limiteNumero : publico.limiteAplicado;
 
   return (
     <section className="space-y-4 rounded-lg border border-border bg-card p-4">
@@ -611,6 +629,7 @@ function PainelPublico({
             inputMode="numeric"
             value={limite}
             onChange={(e) => onLimiteChange(e.target.value)}
+            disabled={simulando || materializando}
             placeholder="sem limite"
             aria-invalid={limiteInvalido}
           />
@@ -627,7 +646,7 @@ function PainelPublico({
           size="sm"
           variant="outline"
           onClick={onMaterializar}
-          disabled={!gerarLiberado || materializando || limiteInvalido}
+          disabled={!gerarLiberado || materializando || simulando || limiteInvalido || !ultimaSimulacao}
         >
           {materializando ? (
             <Loader2 data-icon="inline-start" className="animate-spin" />
@@ -643,9 +662,16 @@ function PainelPublico({
       )}
 
       <p className="text-xs text-muted-foreground">
-        Simular não grava nada — só recalcula quem entraria e por que cada um foi cortado. Gravar
-        fixa os destinatários e pede confirmação.
+        Simule com o limite atual antes de gravar. A simulação não grava nem envia mensagens;
+        gravar fixa os destinatários e pede confirmação.
       </p>
+
+      {!ultimaSimulacao && fonte === "dry_run" && gerarLiberado && (
+        <p className="text-xs text-muted-foreground">
+          O resultado abaixo é do último cálculo salvo. Rode uma simulação com o limite escolhido
+          para habilitar a gravação.
+        </p>
+      )}
 
       {!gerarLiberado && (
         <p className="text-xs text-muted-foreground">
@@ -685,7 +711,7 @@ function PainelPublico({
               {fonte === "materializado"
                 ? `Público gravado em ${dataCurta(publico.calculadoEm)}.`
                 : `Simulação de ${dataCurta(ultimaSimulacaoEm ?? publico.calculadoEm)} — nada foi gravado.`}
-              {publico.limiteAplicado != null && ` Limite aplicado: ${publico.limiteAplicado}.`}
+              {limiteAplicado != null && ` Limite aplicado: ${limiteAplicado}.`}
               {ultimaSimulacao?.a_enfileirar != null &&
                 ` Entrariam na fila: ${ultimaSimulacao.a_enfileirar}.`}
             </p>

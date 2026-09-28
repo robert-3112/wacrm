@@ -45,6 +45,7 @@ export function CampanhasClient({ canais }: { canais: WhatsAppCanal[] }) {
   const [canalId, setCanalId] = useState(canais[0]?.id ?? "");
   const [status, setStatus] = useState<string>("todos");
   const [campanhas, setCampanhas] = useState<CampanhaResumo[]>([]);
+  const [listaTruncada, setListaTruncada] = useState(false);
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
 
@@ -69,8 +70,10 @@ export function CampanhasClient({ canais }: { canais: WhatsAppCanal[] }) {
       if (!r.ok) {
         setErro(r.mensagem);
         setCampanhas([]);
+        setListaTruncada(false);
       } else {
         setCampanhas(r.data.campanhas ?? []);
+        setListaTruncada(r.data.truncado);
       }
     } catch {
       return; // abort
@@ -147,6 +150,17 @@ export function CampanhasClient({ canais }: { canais: WhatsAppCanal[] }) {
           </Select>
         </div>
       </div>
+
+      {listaTruncada && !carregando && !erro && (
+        <Alert>
+          <AlertTriangle />
+          <AlertTitle>Há mais campanhas do que esta lista mostra</AlertTitle>
+          <AlertDescription>
+            Exibindo as 100 campanhas mais recentes deste filtro. Se a campanha não aparecer,
+            escolha outro canal ou status.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {carregando ? (
         <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">

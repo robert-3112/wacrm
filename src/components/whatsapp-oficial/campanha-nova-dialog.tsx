@@ -107,6 +107,8 @@ const DIAS = [
 ] as const;
 
 const SEM_TEMPLATE = "__sem_template__";
+const ETAPAS_CAMPANHA = ["Público", "Mensagem", "Regras", "Revisão"] as const;
+type EtapaCampanha = 0 | 1 | 2 | 3;
 
 function paraNumero(valor: string): number | null {
   const t = valor.trim();
@@ -131,6 +133,12 @@ export function CampanhaNovaDialog({
   const [aberto, setAberto] = useState(false);
   const [salvando, setSalvando] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
+  const [etapa, setEtapa] = useState<EtapaCampanha>(0);
+  const tituloEtapaRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    if (aberto) tituloEtapaRef.current?.focus();
+  }, [aberto, etapa]);
 
   const [nome, setNome] = useState("");
   const [templateId, setTemplateId] = useState<string>(SEM_TEMPLATE);
@@ -223,29 +231,63 @@ export function CampanhaNovaDialog({
    * `variaveis_padrao` é write-once. O bloqueio aqui é a primeira linha; a
    * definitiva é a RPC, que recusa quem chamar direto.
    */
-  const impedimentos: string[] = [];
-  if (!nome.trim()) impedimentos.push("dar um nome à campanha");
-  if (modoPublico === "selecionados" && selecionados.length === 0)
-    impedimentos.push("selecionar ao menos um contato do CRM");
-  if (modoPublico === "segmento" && !confirmarSegmento)
-    impedimentos.push("confirmar o escopo do segmento do CRM");
-  if (erroAgendamento) impedimentos.push(erroAgendamento);
-  if (templateId !== SEM_TEMPLATE && (!templateEscolhido || bloqueioPorId.has(templateId))) {
-    impedimentos.push("escolher um template disponível neste canal");
+  const faltasPublico: string[] = [];
+  const faltasMensagem: string[] = [];
+  const faltasRegras: string[] = [];
+  const faltasRevisao: string[] = [];
+  if (!canalId) faltasPublico.push('escolher um canal');
+  if (!nome.trim()) faltasPublico.push('dar um nome à campanha');
+  if (modoPublico === 'selecionados' && selecionados.length === 0)
+    faltasPublico.push('selecionar ao menos um contato do CRM');
+  if (modoPublico === 'segmento' && !confirmarSegmento)
+    faltasPublico.push('confirmar o escopo do segmento do CRM');
+  if (erroAgendamento) faltasRegras.push(erroAgendamento);
+  if (
+    templateId !== SEM_TEMPLATE &&
+    (!templateEscolhido || bloqueioPorId.has(templateId))
+  ) {
+    faltasMensagem.push('escolher um template disponível neste canal');
   }
   if (
     templateEscolhido &&
-    (!previewAtual?.validacao.ok || previewAtual.statusAprovacao !== "aprovado")
+    (!previewAtual?.validacao.ok || previewAtual.statusAprovacao !== 'aprovado')
   ) {
-    impedimentos.push("conferir a prévia atualizada do template");
+    faltasRevisao.push('conferir a prévia atualizada do template');
   }
   if (!templateEscolhido && !mensagemLivre.trim())
-    impedimentos.push("escolher um template ou escrever a mensagem");
-  if (semBaseLegal) impedimentos.push("marcar ao menos uma base legal");
-  if (janelaPelaMetade) impedimentos.push("completar a janela de horário (início e fim)");
-  if (faltandoVars.length > 0) {
-    impedimentos.push(`preencher ${faltandoVars.map(rotuloCampo).join(", ")}`);
+    faltasMensagem.push('escolher um template ou escrever a mensagem');
+  if (semBaseLegal) faltasRegras.push('marcar ao menos uma base legal');
+  if (janelaPelaMetade)
+    faltasRegras.push('completar a janela de horário (início e fim)');
+  for (const [rotulo, valor] of [
+    ['cooldown', cooldownDias],
+    ['cadência', cadenciaSegundos],
+    ['lote máximo', loteMax],
+    ['limite diário', limiteDiario],
+  ]) {
+    if (valor.trim() && paraNumero(valor) === null) {
+      faltasRegras.push(
+        `informar ${rotulo} com um número inteiro não negativo`
+      );
+    }
   }
+  if (faltandoVars.length > 0) {
+    faltasMensagem.push(
+      `preencher ${faltandoVars.map(rotuloCampo).join(', ')}`
+    );
+  }
+  const impedimentos = [
+    ...faltasPublico,
+    ...faltasMensagem,
+    ...faltasRegras,
+    ...faltasRevisao,
+  ];
+  const impedimentosEtapa = [
+    faltasPublico,
+    faltasMensagem,
+    faltasRegras,
+    impedimentos,
+  ][etapa];
 
   const listaDeTexto = (valor: string): string[] =>
     valor
@@ -254,6 +296,7 @@ export function CampanhaNovaDialog({
       .filter(Boolean);
 
   const resetar = () => {
+    setEtapa(0);
     setNome("");
     setTemplateId(SEM_TEMPLATE);
     setMensagemLivre("");
@@ -318,7 +361,9 @@ export function CampanhaNovaDialog({
       setResultados(r.data.leads);
       setBuscaTruncada(r.data.truncado);
     } catch {
-      /* Busca substituída ou diálogo fechado. */
+      if (!controller.signal.aborted) {
+        setErroBusca("Não foi possível buscar contatos. Tente novamente.");
+      }
     } finally {
       if (!controller.signal.aborted) setBuscando(false);
     }
@@ -348,7 +393,9 @@ export function CampanhaNovaDialog({
       }
       setPreview({ chave: chavePreview, data: r.data });
     } catch {
-      /* Prévia substituída ou diálogo fechado. */
+      if (!controller.signal.aborted) {
+        setErro("Não foi possível conferir a mensagem. Tente novamente.");
+      }
     } finally {
       if (!controller.signal.aborted) setCarregandoPreview(false);
     }
@@ -438,17 +485,65 @@ export function CampanhaNovaDialog({
         <Plus data-icon="inline-start" />
         Nova campanha
       </DialogTrigger>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Nova campanha</DialogTitle>
+      <DialogContent className="flex max-h-[92dvh] flex-col gap-0 overflow-hidden sm:max-w-3xl sm:p-6">
+        <DialogHeader className="shrink-0 pr-8 pb-4">
+          <DialogTitle className="text-xl">Nova campanha</DialogTitle>
           <DialogDescription>
-            Criar só grava um rascunho{canal ? ` no canal ${canal.nome}` : ""}. O público é
-            resolvido depois, na tela da campanha, e o envio ainda precisa de aprovação de outra
-            pessoa.
+            Salve um rascunho no canal {canal?.nome ?? 'selecionado'}. Antes de
+            qualquer envio, você ainda vai conferir o público e solicitar
+            aprovação.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-5">
+        <ol
+          aria-label="Etapas da campanha"
+          className="grid shrink-0 grid-cols-4 gap-1 border-y py-3 sm:gap-2"
+        >
+          {ETAPAS_CAMPANHA.map((titulo, indice) => (
+            <li key={titulo} className="min-w-0">
+              <button
+                type="button"
+                aria-current={etapa === indice ? 'step' : undefined}
+                aria-label={`Etapa ${indice + 1} de 4: ${titulo}`}
+                disabled={indice >= etapa || salvando}
+                onClick={() => {
+                  setEtapa(indice as EtapaCampanha);
+                  setErro(null);
+                }}
+                className="text-muted-foreground focus-visible:ring-ring [&[aria-current=step]]:bg-primary/10 [&[aria-current=step]]:text-primary flex w-full items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-xs font-medium outline-none focus-visible:ring-2 disabled:cursor-default sm:px-2 sm:text-sm"
+              >
+                <span
+                  aria-hidden="true"
+                  className="flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] sm:size-6"
+                >
+                  {indice + 1}
+                </span>
+                <span className="truncate">{titulo}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
+
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto py-5 pr-1">
+          {etapa === 0 && (
+            <section
+              aria-labelledby="campanha-etapa-titulo"
+              className="space-y-5"
+            >
+              <div>
+                <h3
+                  id="campanha-etapa-titulo"
+                  ref={tituloEtapaRef}
+                  tabIndex={-1}
+                  className="text-lg font-semibold outline-none"
+                >
+                  Público da campanha
+                </h3>
+                <p className="text-muted-foreground mt-1 text-sm">
+                  Escolha contatos ou um segmento e aplique filtros antes de
+                  seguir.
+                </p>
+              </div>
           <div className="space-y-1.5">
             <Label htmlFor="campanha-nome">Nome da campanha</Label>
             <Input
@@ -611,6 +706,84 @@ export function CampanhaNovaDialog({
 
           <fieldset className="space-y-3">
             <legend className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+              Segmentação
+            </legend>
+            <p className="text-muted-foreground text-xs">
+              {modoPublico === "selecionados"
+                ? "Estes filtros restringem os contatos escolhidos; não incluem outros leads."
+                : "Os filtros definem o segmento do CRM. Campo em branco não restringe o público."}{" "}
+              Separe múltiplos valores por vírgula.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <CampoTexto
+                id="seg-etapas"
+                label="Etapas"
+                value={etapas}
+                onChange={(v) => {
+                  setEtapas(v);
+                  setConfirmarSegmento(false);
+                }}
+                placeholder="novo, contato"
+              />
+              <CampoTexto
+                id="seg-temperaturas"
+                label="Temperaturas"
+                value={temperaturas}
+                onChange={(v) => {
+                  setTemperaturas(v);
+                  setConfirmarSegmento(false);
+                }}
+                placeholder="quente, morno"
+              />
+              <CampoTexto
+                id="seg-tags"
+                label="Tags"
+                value={tags}
+                onChange={(v) => {
+                  setTags(v);
+                  setConfirmarSegmento(false);
+                }}
+                placeholder="bolsao"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="seg-sem-corretor"
+                checked={semCorretor}
+                onCheckedChange={(v: boolean) => {
+                  setSemCorretor(v);
+                  setConfirmarSegmento(false);
+                }}
+              />
+              <Label htmlFor="seg-sem-corretor" className="text-sm font-normal">
+                Somente leads sem corretor
+              </Label>
+            </div>
+          </fieldset>
+            </section>
+          )}
+
+          {etapa === 1 && (
+            <section
+              aria-labelledby="campanha-etapa-titulo"
+              className="space-y-5"
+            >
+              <div>
+                <h3
+                  id="campanha-etapa-titulo"
+                  ref={tituloEtapaRef}
+                  tabIndex={-1}
+                  className="text-lg font-semibold outline-none"
+                >
+                  Mensagem
+                </h3>
+                <p className="text-muted-foreground mt-1 text-sm">
+                  Use um template aprovado para conversas fora da janela de 24
+                  horas.
+                </p>
+              </div>
+          <fieldset className="space-y-3">
+            <legend className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
               Conteúdo
             </legend>
             <div className="space-y-1.5">
@@ -711,7 +884,28 @@ export function CampanhaNovaDialog({
               )}
             </fieldset>
           )}
+            </section>
+          )}
 
+          {etapa === 2 && (
+            <section
+              aria-labelledby="campanha-etapa-titulo"
+              className="space-y-5"
+            >
+              <div>
+                <h3
+                  id="campanha-etapa-titulo"
+                  ref={tituloEtapaRef}
+                  tabIndex={-1}
+                  className="text-lg font-semibold outline-none"
+                >
+                  Regras de envio
+                </h3>
+                <p className="text-muted-foreground mt-1 text-sm">
+                  Defina consentimento, limites, horários e quem atende as
+                  respostas.
+                </p>
+              </div>
           <fieldset className="space-y-3">
             <legend className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
               Consentimento
@@ -868,63 +1062,6 @@ export function CampanhaNovaDialog({
             </div>
           </fieldset>
 
-          <fieldset className="space-y-3">
-            <legend className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-              Segmentação
-            </legend>
-            <p className="text-muted-foreground text-xs">
-              {modoPublico === "selecionados"
-                ? "Estes filtros restringem os contatos escolhidos; não incluem outros leads."
-                : "Os filtros definem o segmento do CRM. Campo em branco não restringe o público."}{" "}
-              Separe múltiplos valores por vírgula.
-            </p>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <CampoTexto
-                id="seg-etapas"
-                label="Etapas"
-                value={etapas}
-                onChange={(v) => {
-                  setEtapas(v);
-                  setConfirmarSegmento(false);
-                }}
-                placeholder="novo, contato"
-              />
-              <CampoTexto
-                id="seg-temperaturas"
-                label="Temperaturas"
-                value={temperaturas}
-                onChange={(v) => {
-                  setTemperaturas(v);
-                  setConfirmarSegmento(false);
-                }}
-                placeholder="quente, morno"
-              />
-              <CampoTexto
-                id="seg-tags"
-                label="Tags"
-                value={tags}
-                onChange={(v) => {
-                  setTags(v);
-                  setConfirmarSegmento(false);
-                }}
-                placeholder="bolsao"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="seg-sem-corretor"
-                checked={semCorretor}
-                onCheckedChange={(v: boolean) => {
-                  setSemCorretor(v);
-                  setConfirmarSegmento(false);
-                }}
-              />
-              <Label htmlFor="seg-sem-corretor" className="text-sm font-normal">
-                Somente leads sem corretor
-              </Label>
-            </div>
-          </fieldset>
-
           <div className="space-y-1.5">
             <Label htmlFor="campanha-handoff">Quem atende as respostas</Label>
             <Select
@@ -968,101 +1105,184 @@ export function CampanhaNovaDialog({
             </p>
             {erroAgendamento && <p className="text-destructive text-xs">{erroAgendamento}</p>}
           </div>
+            </section>
+          )}
 
-          <section
-            aria-label="Revisão da campanha"
-            className="bg-muted/30 space-y-3 rounded-lg border p-4"
-          >
-            <h3 className="font-semibold">Confira antes de criar</h3>
-            <dl className="grid gap-3 text-sm sm:grid-cols-2">
+          {etapa === 3 && (
+            <section
+              aria-labelledby="campanha-etapa-titulo"
+              className="space-y-5"
+            >
               <div>
-                <dt className="text-muted-foreground">Remetente</dt>
-                <dd className="break-words">
-                  {canal?.nome} {canal?.numero_display ? `(${canal.numero_display})` : ""}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">Público</dt>
-                <dd>
-                  {modoPublico === "selecionados"
-                    ? `${selecionados.length} contatos escolhidos, sujeitos aos filtros e à elegibilidade`
-                    : "Segmento do CRM; quantidade a conferir na geração do público"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">Início</dt>
-                <dd>
-                  {erroAgendamento
-                    ? "Confira a data e o horário"
-                    : agendadoPara
-                      ? new Date(agendadoPara).toLocaleString("pt-BR", {
-                          dateStyle: "short",
-                          timeStyle: "short",
-                        })
-                      : "Após a aprovação"}{" "}
-                  · {fuso}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">Atendimento</dt>
-                <dd>{POLITICAS_HANDOFF.find((p) => p.value === politicaHandoff)?.label}</dd>
-              </div>
-            </dl>
-            {templateEscolhido ? (
-              <>
-                <Button
-                  variant="outline"
-                  disabled={carregandoPreview || faltandoVars.length > 0}
-                  onClick={() => void conferirPreview()}
+                <h3
+                  id="campanha-etapa-titulo"
+                  ref={tituloEtapaRef}
+                  tabIndex={-1}
+                  className="text-lg font-semibold outline-none"
                 >
-                  {carregandoPreview ? "Carregando prévia…" : "Conferir mensagem final"}
-                </Button>
-                {previewAtual ? (
-                  <div className="bg-background space-y-2 rounded-lg border p-3 text-sm break-words whitespace-pre-wrap">
-                    {previewAtual.preview.cabecalho && (
-                      <p className="font-semibold">{previewAtual.preview.cabecalho}</p>
-                    )}
-                    <p>{previewAtual.preview.corpo}</p>
-                    {previewAtual.preview.rodape && (
-                      <p className="text-muted-foreground text-xs">{previewAtual.preview.rodape}</p>
-                    )}
-                    {previewAtual.preview.botoes.map((botao) => (
-                      <p key={botao.indice} className="border-t pt-2">
-                        {botao.texto}
-                      </p>
-                    ))}
-                    {campos
-                      .filter((campo) => campo.onde === "midia" || campo.onde === "botao")
-                      .map((campo) => (
-                        <p key={campo.chave} className="text-muted-foreground text-xs">
-                          {campo.rotulo}:{" "}
-                          {valoresVars[campo.chave]?.trim() || "Mídia de exemplo do template"}
-                        </p>
-                      ))}
-                    {(!previewAtual.validacao.ok ||
-                      previewAtual.statusAprovacao !== "aprovado") && (
-                      <p role="alert" className="text-destructive">
-                        Confira os valores e a aprovação do template antes de continuar.
-                      </p>
-                    )}
+                  Revisão
+                </h3>
+                <p className="text-muted-foreground mt-1 text-sm">
+                  Confira a mensagem e os limites. Criar apenas salva o
+                  rascunho.
+                </p>
+              </div>
+              <section
+                aria-label="Revisão da campanha"
+                className="bg-muted/30 space-y-3 rounded-lg border p-4"
+              >
+                <h3 className="font-semibold">Confira antes de criar</h3>
+                <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                  <div>
+                    <dt className="text-muted-foreground">Campanha</dt>
+                    <dd className="break-words">{nome.trim()}</dd>
                   </div>
+                  <div>
+                    <dt className="text-muted-foreground">Remetente</dt>
+                    <dd className="break-words">
+                      {canal?.nome}{' '}
+                      {canal?.numero_display ? `(${canal.numero_display})` : ''}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Público</dt>
+                    <dd>
+                      {modoPublico === 'selecionados'
+                        ? `${selecionados.length} contatos escolhidos, sujeitos aos filtros e à elegibilidade`
+                        : 'Segmento do CRM; quantidade a conferir na geração do público'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Mensagem</dt>
+                    <dd>
+                      {templateEscolhido
+                        ? `Template ${templateEscolhido.nome}`
+                        : 'Mensagem livre, somente na janela de 24 horas'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Consentimento</dt>
+                    <dd>
+                      {exigeBaseLegal
+                        ? `Base legal exigida: ${basesLegais
+                            .map(
+                              (base) =>
+                                BASES_LEGAIS.find((item) => item.value === base)
+                                  ?.label ?? base
+                            )
+                            .join(', ')}`
+                        : 'Respeitar opt-out'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Início</dt>
+                    <dd>
+                      {erroAgendamento
+                        ? 'Confira a data e o horário'
+                        : agendadoPara
+                          ? new Date(agendadoPara).toLocaleString('pt-BR', {
+                              dateStyle: 'short',
+                              timeStyle: 'short',
+                            })
+                          : 'Após a aprovação'}{' '}
+                      · {fuso}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Atendimento</dt>
+                    <dd>
+                      {
+                        POLITICAS_HANDOFF.find(
+                          (p) => p.value === politicaHandoff
+                        )?.label
+                      }
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Ritmo</dt>
+                    <dd>
+                      {cadenciaSegundos
+                        ? `A cada ${cadenciaSegundos} segundos`
+                        : 'Cadência padrão'}
+                      {'; '}
+                      {limiteDiario
+                        ? `até ${limiteDiario} por dia`
+                        : 'limite diário padrão'}
+                    </dd>
+                  </div>
+                </dl>
+                {templateEscolhido ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      disabled={carregandoPreview || faltandoVars.length > 0}
+                      onClick={() => void conferirPreview()}
+                    >
+                      {carregandoPreview
+                        ? 'Carregando prévia…'
+                        : 'Conferir mensagem final'}
+                    </Button>
+                    {previewAtual ? (
+                      <div className="bg-background space-y-2 rounded-lg border p-3 text-sm break-words whitespace-pre-wrap">
+                        {previewAtual.preview.cabecalho && (
+                          <p className="font-semibold">
+                            {previewAtual.preview.cabecalho}
+                          </p>
+                        )}
+                        <p>{previewAtual.preview.corpo}</p>
+                        {previewAtual.preview.rodape && (
+                          <p className="text-muted-foreground text-xs">
+                            {previewAtual.preview.rodape}
+                          </p>
+                        )}
+                        {previewAtual.preview.botoes.map((botao) => (
+                          <p key={botao.indice} className="border-t pt-2">
+                            {botao.texto}
+                          </p>
+                        ))}
+                        {campos
+                          .filter(
+                            (campo) =>
+                              campo.onde === 'midia' || campo.onde === 'botao'
+                          )
+                          .map((campo) => (
+                            <p
+                              key={campo.chave}
+                              className="text-muted-foreground text-xs"
+                            >
+                              {campo.rotulo}:{' '}
+                              {valoresVars[campo.chave]?.trim() ||
+                                'Mídia de exemplo do template'}
+                            </p>
+                          ))}
+                        {(!previewAtual.validacao.ok ||
+                          previewAtual.statusAprovacao !== 'aprovado') && (
+                          <p role="alert" className="text-destructive">
+                            Confira os valores e a aprovação do template antes
+                            de continuar.
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-muted-foreground text-xs">
+                        Confira a mensagem após preencher as variáveis. Ao
+                        alterar algum valor, atualize a prévia.
+                      </p>
+                    )}
+                  </>
                 ) : (
-                  <p className="text-muted-foreground text-xs">
-                    Confira a mensagem após preencher as variáveis. Ao alterar algum valor, atualize
-                    a prévia.
+                  <p className="bg-background rounded-lg border p-3 text-sm break-words whitespace-pre-wrap">
+                    {mensagemLivre || 'Escreva a mensagem acima.'}
                   </p>
                 )}
-              </>
-            ) : (
-              <p className="bg-background rounded-lg border p-3 text-sm break-words whitespace-pre-wrap">
-                {mensagemLivre || "Escreva a mensagem acima."}
-              </p>
-            )}
-            <p className="text-muted-foreground text-xs">
-              Criar salva um rascunho. A geração do público verifica consentimento e demais regras;
-              outra pessoa da gestão precisa aprovar o envio.
-            </p>
-          </section>
+                <p className="text-muted-foreground text-xs">
+                  Criar salva um rascunho. A geração do público verifica
+                  consentimento e demais regras; outra pessoa da gestão precisa
+                  aprovar o envio.
+                </p>
+              </section>
+            </section>
+          )}
 
           {erro && (
             <Alert variant="destructive">
@@ -1072,15 +1292,19 @@ export function CampanhaNovaDialog({
           )}
         </div>
 
-        {impedimentos.length > 0 && (
-          <p className="text-muted-foreground text-xs">
-            <span className="text-foreground font-medium">Falta para criar:</span>{" "}
-            {impedimentos.join("; ")}.
+        {impedimentosEtapa.length > 0 && (
+          <p
+            role="status"
+            className="text-muted-foreground shrink-0 border-t pt-3 text-xs"
+          >
+            <span className="text-foreground font-medium">Para continuar:</span>{' '}
+            {impedimentosEtapa.join('; ')}.
           </p>
         )}
 
-        <DialogFooter>
+        <DialogFooter className="mt-4 shrink-0">
           <Button
+            type="button"
             variant="outline"
             onClick={() => {
               setAberto(false);
@@ -1090,13 +1314,42 @@ export function CampanhaNovaDialog({
           >
             Cancelar
           </Button>
-          <Button
-            onClick={() => void handleSalvar()}
-            disabled={salvando || impedimentos.length > 0}
-          >
-            {salvando && <Loader2 data-icon="inline-start" className="animate-spin" />}
-            Criar rascunho
-          </Button>
+          {etapa > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={salvando}
+              onClick={() => {
+                setEtapa((etapa - 1) as EtapaCampanha);
+                setErro(null);
+              }}
+            >
+              Voltar
+            </Button>
+          )}
+          {etapa < 3 ? (
+            <Button
+              type="button"
+              disabled={salvando || impedimentosEtapa.length > 0}
+              onClick={() => {
+                setEtapa((etapa + 1) as EtapaCampanha);
+                setErro(null);
+              }}
+            >
+              Continuar
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              onClick={() => void handleSalvar()}
+              disabled={salvando || impedimentos.length > 0}
+            >
+              {salvando && (
+                <Loader2 data-icon="inline-start" className="animate-spin" />
+              )}
+              Criar rascunho
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

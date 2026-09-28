@@ -210,7 +210,7 @@ export function previewTemplate(
 export function listarCampanhas(
   filtro: { canalId?: string; status?: string } = {},
   signal?: AbortSignal,
-): Promise<ApiResultado<{ ok: true; campanhas: CampanhaResumo[] }>> {
+): Promise<ApiResultado<{ ok: true; campanhas: CampanhaResumo[]; truncado: boolean }>> {
   const params = new URLSearchParams()
   if (filtro.canalId) params.set('canalId', filtro.canalId)
   if (filtro.status && filtro.status !== 'todos') params.set('status', filtro.status)
