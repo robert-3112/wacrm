@@ -82,10 +82,10 @@ export function ConversationList({
   const filtered = useMemo(() => {
     return conversations.filter(
       (c) => (channelId === "todos" || c.canal_id === channelId)
-        && (filter === "nao_lidas" ? c.nao_lidas_corretor > 0 : matchesInboxFilter(c, filter))
+        && (filter === "nao_lidas" ? c.nao_lidas_corretor > 0 || c.id === activeConversationId : matchesInboxFilter(c, filter))
         && matchesSearch(c, search),
     ).sort((a, b) => Date.parse(b.ultima_mensagem_em ?? b.created_at) - Date.parse(a.ultima_mensagem_em ?? a.created_at));
-  }, [conversations, filter, search, channelId]);
+  }, [conversations, filter, search, channelId, activeConversationId]);
 
   const activeFilterLabel = LIST_FILTER_OPTIONS.find((f) => f.value === filter)?.label ?? "Todas";
   const activeChannelLabel = channels.find((c) => c.id === channelId)?.name ?? "Todos os canais";
