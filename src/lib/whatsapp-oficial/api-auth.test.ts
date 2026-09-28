@@ -29,7 +29,18 @@ function makeFakeUserClient(opts: {
   user: { id: string } | null
   conversationRow: Record<string, unknown> | null
   selectError?: { message: string } | null
+  isGestao?: boolean
+  corretorId?: string | null
+  leadRow?: Record<string, unknown> | null
+  channelRow?: Record<string, unknown> | null
+  roleError?: { message: string } | null
+  sharedAccess?: boolean
 }) {
+  const rows: Record<string, Record<string, unknown> | null> = {
+    whatsapp_conversations: opts.conversationRow,
+    leads: opts.leadRow ?? null,
+    whatsapp_channels: opts.channelRow ?? null,
+  }
   return {
     auth: {
       getUser: vi.fn().mockResolvedValue({
@@ -37,12 +48,18 @@ function makeFakeUserClient(opts: {
         error: opts.user ? null : { message: 'no session' },
       }),
     },
-    from: vi.fn(() => ({
+    rpc: vi.fn(async (name: string) => ({
+      data: name === 'crm_is_gestao' ? (opts.isGestao ?? true)
+        : name === 'crm_current_corretor_id' ? opts.corretorId ?? null
+          : opts.sharedAccess ?? false,
+      error: opts.roleError ?? null,
+    })),
+    from: vi.fn((table: string) => ({
       select: vi.fn(() => ({
         eq: vi.fn(() => ({
           maybeSingle: vi.fn().mockResolvedValue({
-            data: opts.conversationRow,
-            error: opts.selectError ?? null,
+            data: rows[table] ?? null,
+            error: table === 'whatsapp_conversations' ? opts.selectError ?? null : null,
           }),
         })),
       })),
@@ -106,5 +123,71 @@ describe('requireConversationAccess', () => {
     expect(ctx.userId).toBe('owner-corretor')
     expect(ctx.conversation).toEqual(row)
     expect(ctx.admin).toEqual({ marker: 'admin-client' })
+  })
+
+  const row = {
+    id: 'conv-1', tenant_id: 'sunt', canal_id: 'canal-1', lead_id: 'lead-1', status: 'aberta',
+  }
+  const lead = { id: 'lead-1', tenant_id: 'sunt', corretor_id: 'broker-1' }
+  const channel = { id: 'canal-1', tenant_id: 'sunt', corretor_id: 'broker-1' }
+
+  it('allows a broker only when the lead and channel belong to that same broker', async () => {
+    const client = makeFakeUserClient({
+      user: { id: 'user-1' }, conversationRow: row,
+      isGestao: false, corretorId: 'broker-1', leadRow: lead, channelRow: channel,
+    })
+    mocks.createServerClient.mockResolvedValue(client)
+
+    const ctx = await requireConversationAccess('conv-1')
+
+    expect(ctx.conversation).toEqual(row)
+    expect(client.rpc).toHaveBeenCalledWith('crm_current_corretor_id')
+    expect(client.from).toHaveBeenCalledWith('leads')
+    expect(client.from).toHaveBeenCalledWith('whatsapp_channels')
+  })
+
+  it('allows the shared 1266 only when the authenticated database gate attests default-channel access', async () => {
+    const client = makeFakeUserClient({
+      user: { id: 'user-1' }, conversationRow: row,
+      isGestao: false, corretorId: 'broker-1', leadRow: lead,
+      channelRow: null, sharedAccess: true,
+    })
+    mocks.createServerClient.mockResolvedValue(client)
+
+    const ctx = await requireConversationAccess('conv-1')
+
+    expect(ctx.conversation).toEqual(row)
+    expect(client.rpc).toHaveBeenCalledWith('whatsapp_oficial_corretor_pode_ler_conversa', {
+      p_conversation_id: 'conv-1',
+    })
+  })
+
+  it.each([
+    ['other broker channel', lead, { ...channel, corretor_id: 'broker-2' }],
+    ['other broker lead', { ...lead, corretor_id: 'broker-2' }, channel],
+    ['other tenant channel', lead, { ...channel, tenant_id: 'other' }],
+    ['other tenant lead', { ...lead, tenant_id: 'other' }, channel],
+    ['hidden channel', lead, null],
+  ])('rejects a broker for %s before creating service_role', async (_case, leadRow, channelRow) => {
+    mocks.createServerClient.mockResolvedValue(makeFakeUserClient({
+      user: { id: 'user-1' }, conversationRow: row,
+      isGestao: false, corretorId: 'broker-1', leadRow, channelRow,
+    }))
+
+    await expect(requireConversationAccess('conv-1')).rejects.toBeInstanceOf(NotFoundError)
+    expect(mocks.supabaseAdmin).not.toHaveBeenCalled()
+  })
+
+  it('rejects broker access when role lookup fails or broker is inactive', async () => {
+    mocks.createServerClient.mockResolvedValueOnce(makeFakeUserClient({
+      user: { id: 'user-1' }, conversationRow: row, roleError: { message: 'rpc unavailable' },
+    }))
+    await expect(requireConversationAccess('conv-1')).rejects.toBeInstanceOf(NotFoundError)
+
+    mocks.createServerClient.mockResolvedValueOnce(makeFakeUserClient({
+      user: { id: 'user-1' }, conversationRow: row, isGestao: false, corretorId: null,
+    }))
+    await expect(requireConversationAccess('conv-1')).rejects.toBeInstanceOf(NotFoundError)
+    expect(mocks.supabaseAdmin).not.toHaveBeenCalled()
   })
 })

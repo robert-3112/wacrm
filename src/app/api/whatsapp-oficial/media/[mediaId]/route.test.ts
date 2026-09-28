@@ -2,13 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   createClient: vi.fn(), supabaseAdmin: vi.fn(), decryptToken: vi.fn(),
-  getMediaUrl: vi.fn(), downloadMedia: vi.fn(),
+  getMediaUrl: vi.fn(), downloadMedia: vi.fn(), requireConversationAccess: vi.fn(),
 }))
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }))
 vi.mock('@/lib/whatsapp-oficial/supabase-admin', () => ({ supabaseAdmin: mocks.supabaseAdmin }))
 vi.mock('@/lib/whatsapp-oficial/crypto', () => ({ decryptToken: mocks.decryptToken }))
 vi.mock('@/lib/whatsapp-oficial/meta-api', () => ({
   getMediaUrl: mocks.getMediaUrl, downloadMedia: mocks.downloadMedia,
+}))
+vi.mock('@/lib/whatsapp-oficial/api-auth', async () => ({
+  ...await vi.importActual('@/lib/whatsapp-oficial/api-auth'),
+  requireConversationAccess: mocks.requireConversationAccess,
 }))
 
 import { GET } from './route'
@@ -32,10 +36,11 @@ describe('official media relay for inbound and outbound messages', () => {
       auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: 'u1' } }, error: null }) },
       from: vi.fn(() => message),
     })
-    const conversation = query({ canal_id: 'ch1' })
     const channel = query({ access_token_cifrado: 'encrypted' })
-    mocks.supabaseAdmin.mockReturnValue({
-      from: vi.fn((table: string) => table === 'whatsapp_conversations' ? conversation : channel),
+    const admin = { from: vi.fn(() => channel) }
+    mocks.supabaseAdmin.mockReturnValue(admin)
+    mocks.requireConversationAccess.mockResolvedValue({
+      conversation: { id: 'c1', tenant_id: 'sunt', canal_id: 'ch1' }, admin,
     })
     mocks.decryptToken.mockReturnValue('test-token')
     mocks.getMediaUrl.mockResolvedValue({ url: 'https://graph.facebook.com/media', mimeType: 'image/jpeg' })
@@ -48,11 +53,22 @@ describe('official media relay for inbound and outbound messages', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Type')).toBe('image/jpeg')
     expect(mocks.getMediaUrl).toHaveBeenCalledWith({ mediaId: '1234567890', accessToken: 'test-token' })
-    const admin = mocks.supabaseAdmin.mock.results[0].value
-    const conversation = admin.from.mock.results[0].value
-    const channel = admin.from.mock.results[1].value
-    expect(conversation.eq).toHaveBeenCalledWith('tenant_id', 'sunt')
+    const ctx = await mocks.requireConversationAccess.mock.results[0].value
+    const channel = ctx.admin.from.mock.results[0].value
+    expect(mocks.requireConversationAccess).toHaveBeenCalledWith('c1')
     expect(channel.eq).toHaveBeenCalledWith('tenant_id', 'sunt')
+  })
+
+  it('denies media when the user cannot access both the lead and channel', async () => {
+    const { NotFoundError } = await import('@/lib/whatsapp-oficial/api-auth')
+    mocks.requireConversationAccess.mockRejectedValue(new NotFoundError())
+
+    const res = await GET(new Request('http://localhost/media/1234567890'),
+      { params: Promise.resolve({ mediaId: '1234567890' }) })
+
+    expect(res.status).toBe(404)
+    expect(mocks.supabaseAdmin).not.toHaveBeenCalled()
+    expect(mocks.decryptToken).not.toHaveBeenCalled()
   })
 
   it('rejects a non-numeric media ID before looking up any message', async () => {
