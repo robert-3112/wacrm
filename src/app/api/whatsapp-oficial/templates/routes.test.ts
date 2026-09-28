@@ -174,9 +174,10 @@ function gestaoContext(admin: unknown, supabaseUser: unknown = { from: vi.fn() }
   return { userId: 'gestor-1', supabaseUser, admin }
 }
 
-/** Sessão que a RLS de `whatsapp_channels` deixa ver o canal (= gestão do tenant). */
-function gestaoComCanalVisivel(admin: unknown, visivel: unknown = { id: 'canal-1' }) {
+/** Sessão com canal visível; corretor também pode vê-lo após a Fase B. */
+function gestaoComCanalVisivel(admin: unknown, visivel: unknown = { id: 'canal-1' }, adminGestor = true) {
   const { client } = makeClient({ data: visivel, error: null })
+  Object.assign(client, { rpc: vi.fn(async () => ({ data: adminGestor, error: null })) })
   return gestaoContext(admin, client)
 }
 
@@ -261,6 +262,20 @@ describe('POST /api/whatsapp-oficial/templates/sync', () => {
     expect(mocks.decryptToken).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
     expect(admin.rpc).not.toHaveBeenCalled()
+  })
+
+  it('barra corretor mesmo quando a RLS deixa ver seu canal, antes de ler o token ou chamar a Meta', async () => {
+    const admin = makeSyncAdmin()
+    const context = gestaoComCanalVisivel(admin, { id: 'canal-1' }, false)
+    mocks.requireGestaoSession.mockResolvedValue(context)
+
+    const res = await sincronizarTemplates(postRequest('/sync', { canalId: 'canal-1' }))
+
+    expect(res.status).toBe(403)
+    expect((context.supabaseUser as { rpc: Mock }).rpc).toHaveBeenCalledWith('crm_is_admin_gestor')
+    expect(admin.from).not.toHaveBeenCalled()
+    expect(mocks.decryptToken).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('devolve 404 para canal inexistente', async () => {
