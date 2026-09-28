@@ -47,3 +47,26 @@ it('exige confirmação explícita de escopo no modo segmento', async () => {
   expect(rpc).not.toHaveBeenCalled()
   expect((await create({ segmentacao: { modo: 'segmento', confirmado: true, tags: ['teste'] } })).status).toBe(201)
 })
+it.each([
+  { criado_de: '2026-02-31T00:00:00.000Z' },
+  { criado_ate: '2026-01-01' },
+  { criado_de: 123 },
+  { criado_de: '2026-02-01T00:00:00.000Z', criado_ate: '2026-01-31T23:59:59.999Z' },
+  { criado_de: '2026-09-28T23:59:59.999999Z', criado_ate: '2026-09-28T23:59:59.999Z' },
+])('recusa período de público inválido antes da RPC: %j', async (periodo) => {
+  const response = await create({ segmentacao: { modo: 'segmento', confirmado: true, ...periodo } })
+  expect(response.status).toBe(422)
+  expect(await response.json()).toEqual({ error: 'periodo_publico_invalido' })
+  expect(rpc).not.toHaveBeenCalled()
+})
+it('aceita intervalo UTC válido e preserva o fim inclusivo', async () => {
+  const segmentacao = { modo: 'segmento', confirmado: true,
+    criado_de: '2026-09-01T03:00:00.000Z', criado_ate: '2026-10-01T02:59:59.999999Z' }
+  expect((await create({ segmentacao })).status).toBe(201)
+  expect(rpc.mock.calls[0][1].p_config.segmentacao).toEqual(segmentacao)
+})
+it.each([{ origens: 'site_form' }, { origens: [] }, { origens: [''] }])
+  ('recusa lista de origens inválida sem chamar a RPC: %j', async (filtros) => {
+    expect((await create({ segmentacao: { modo: 'segmento', confirmado: true, ...filtros } })).status).toBe(422)
+    expect(rpc).not.toHaveBeenCalled()
+  })

@@ -7,6 +7,7 @@ import {
   rateLimitResponse,
 } from '@/lib/whatsapp-oficial/rate-limit'
 import { validarVariaveisPadrao } from '@/lib/whatsapp-oficial/template-campos'
+import { isoMicros } from '@/lib/whatsapp-oficial/iso-micros'
 
 /**
  * Campanhas (broadcasts) do canal oficial — listar e criar.
@@ -211,6 +212,29 @@ export async function POST(request: Request): Promise<Response> {
       if (!Array.isArray(seg.lead_ids) || seg.lead_ids.length === 0 || seg.lead_ids.length > 500 ||
         seg.lead_ids.some((id) => typeof id !== 'string' || !UUID_RE.test(id))) {
         return unprocessable('lead_ids_invalidos')
+      }
+    }
+    // A RPC converte esses valores diretamente para timestamptz e usa
+    // jsonb_array_elements. Recusar entradas ruins aqui evita um 500 e deixa
+    // claro qual filtro precisa ser corrigido pelo operador.
+    const datas = ['criado_de', 'criado_ate'] as const
+    for (const campo of datas) {
+      const valor = seg[campo]
+      if (valor === undefined) continue
+      if (typeof valor !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:\d{3})?Z$/.test(valor) ||
+        !Number.isFinite(Date.parse(valor)) ||
+        new Date(valor).toISOString() !== valor.replace(/\.(\d{3})\d{3}Z$/, '.$1Z')) {
+        return unprocessable('periodo_publico_invalido')
+      }
+    }
+    if (typeof seg.criado_de === 'string' && typeof seg.criado_ate === 'string' &&
+      isoMicros(seg.criado_de) > isoMicros(seg.criado_ate)) return unprocessable('periodo_publico_invalido')
+    for (const campo of ['etapas', 'temperaturas', 'tags', 'origens'] as const) {
+      const valores = seg[campo]
+      if (valores !== undefined && (!Array.isArray(valores) || valores.length === 0 ||
+        valores.length > 100 || valores.some((valor) => typeof valor !== 'string' || !valor.trim()))) {
+        return unprocessable('segmentacao_invalida')
       }
     }
     const agendado = config.agendado_para

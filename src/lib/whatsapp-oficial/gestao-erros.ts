@@ -94,6 +94,7 @@ const MENSAGENS: Record<string, string> = {
   mensagem_livre_invalida: 'A mensagem livre é inválida.',
   config_invalida: 'A configuração da campanha é inválida.',
   segmentacao_invalida: 'Confira os filtros e confirme o escopo do público da campanha.',
+  periodo_publico_invalido: 'Confira as datas de criação do público; o início deve vir antes do fim.',
   lead_ids_invalidos: 'Selecione entre 1 e 500 contatos válidos do CRM.',
   agendamento_invalido: 'Escolha uma data e um horário válidos no futuro e confira o fuso.',
   campanha_nao_criada: 'A campanha não foi criada.',
