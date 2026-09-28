@@ -22,10 +22,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
 import {
+  buildInboxItems,
   fetchConversationById,
+  fetchConversationPairs,
   fetchConversations,
   fetchMessages,
+  fetchPairedMessages,
+  mergePairedMessages,
 } from "@/lib/whatsapp-oficial/inbox-data";
+import type { InboxItem } from "@/lib/whatsapp-oficial/inbox-data";
 import { markConversationRead } from "@/lib/whatsapp-oficial/inbox-actions";
 import { useWhatsAppOficialRealtime } from "@/hooks/use-whatsapp-oficial-realtime";
 import { ConversationList } from "./conversation-list";
@@ -34,13 +39,16 @@ import { LeadSidebar } from "./lead-sidebar";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ContactRound } from "lucide-react";
-import type { WhatsAppConversation, WhatsAppMessage } from "@/types/whatsapp-oficial";
+import type { WhatsAppConversation, WhatsAppConversationPair, WhatsAppMessage } from "@/types/whatsapp-oficial";
 
 export function InboxClient({ envioReal }: { envioReal: boolean }) {
   const [conversations, setConversations] = useState<WhatsAppConversation[]>([]);
+  const conversationsRef = useRef<WhatsAppConversation[]>([]);
+  const [pairs, setPairs] = useState<WhatsAppConversationPair[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(true);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [channelNames, setChannelNames] = useState<Record<string, string>>({});
@@ -79,19 +87,45 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     return () => { cancelled = true; };
   }, [channelIdsKey]);
 
-  const activeConversation = useMemo(
-    () => conversations.find((c) => c.id === activeId) ?? null,
-    [conversations, activeId],
-  );
+  const items = useMemo(() => buildInboxItems(conversations, pairs), [conversations, pairs]);
+  const activeItem = useMemo(() => items.find((item) => item.id === activeId) ?? null, [items, activeId]);
+  const activeConversation = activeItem?.kind === "single" ? activeItem.conversation : null;
+  const activePair = activeItem?.kind === "pair" ? activeItem : null;
 
   // Mirrors `activeId` for the realtime message handler below, which is
   // registered once (empty dep) and would otherwise close over a stale
   // value — same pattern the WACRM original documents on its
   // `knownConvIdsRef`.
   const activeIdRef = useRef<string | null>(null);
+  const activeMemberIdsRef = useRef<string[]>([]);
   useEffect(() => {
     activeIdRef.current = activeId;
-  }, [activeId]);
+    activeMemberIdsRef.current = activeItem?.kind === "pair"
+      ? [activeItem.outbound.id, activeItem.inbound.id]
+      : activeItem ? [activeItem.conversation.id] : [];
+  }, [activeId, activeItem]);
+
+  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
+
+  // A newly verified link replaces its two individual rows without losing selection.
+  useEffect(() => {
+    if (!activeId || activeItem) return;
+    const replacement = items.find((item) => item.kind === "pair" &&
+      (item.outbound.id === activeId || item.inbound.id === activeId));
+    if (replacement) setActiveId(replacement.id);
+    else if (!conversationsLoading) setActiveId(null);
+  }, [activeId, activeItem, items, conversationsLoading]);
+
+  const loadVerifiedPairs = useCallback(async (supabase: ReturnType<typeof createClient>, visibleConversations: WhatsAppConversation[]) => {
+    const result = await fetchConversationPairs(supabase);
+    if (result.error) return result;
+    const eligible = buildInboxItems(visibleConversations, result.data)
+      .filter((item): item is Extract<InboxItem, { kind: "pair" }> => item.kind === "pair");
+    const checked = await Promise.all(eligible.map(async item => ({
+      pair: item.pair, history: await fetchPairedMessages(supabase, item.pair),
+    })));
+    return { data: checked.filter(item => !item.history.error).map(item => item.pair), error: null };
+  }, []);
 
   // Current user id — used by the notes panel to label the caller's own
   // notes "Você" instead of resolving their name through `corretores`.
@@ -118,32 +152,52 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
       if (cancelled) return;
       if (error) toast.error("Não foi possível carregar as conversas.");
       setConversations(data);
+      conversationsRef.current = data;
       setConversationsLoading(false);
+      const pairResult = await loadVerifiedPairs(supabase, data);
+      if (cancelled) return;
+      if (pairResult.error) toast.error("Não foi possível carregar as conversas vinculadas.");
+      setPairs(pairResult.data);
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadVerifiedPairs]);
+
+  // Links are created by the verified webhook, not by a conversation mutation.
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      const result = await loadVerifiedPairs(createClient(), conversationsRef.current);
+      if (!result.error) setPairs(result.data);
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [loadVerifiedPairs]);
 
   // Messages fetch whenever the selected conversation changes.
   useEffect(() => {
-    if (!activeId) {
+    if (!activeItem) {
       setMessages([]);
+      setMessagesError(null);
       return;
     }
     let cancelled = false;
     setMessagesLoading(true);
     (async () => {
       const supabase = createClient();
-      const { data, error } = await fetchMessages(supabase, activeId);
+      const { data, error } = activeItem.kind === "pair"
+        ? await fetchPairedMessages(supabase, activeItem.pair)
+        : await fetchMessages(supabase, activeItem.conversation.id);
       if (cancelled) return;
       if (error) toast.error("Não foi possível carregar as mensagens.");
+      setMessagesError(error);
       setMessages(data);
       setMessagesLoading(false);
     })();
     return () => {
       cancelled = true;
     };
+  // Pair membership is immutable; depend on the selected identity rather than every realtime row update.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
   // Mark-as-read: fires once per conversation selection that has unread
@@ -199,8 +253,8 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     (event: { eventType: "INSERT" | "UPDATE" | "DELETE"; new: WhatsAppMessage }) => {
       const msg = event.new;
       if (event.eventType === "INSERT") {
-        if (msg.conversation_id !== activeIdRef.current) return;
-        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+        if (!activeMemberIdsRef.current.includes(msg.conversation_id)) return;
+        setMessages((prev) => prev.some((m) => m.id === msg.id) ? prev : mergePairedMessages(prev, [msg]));
       } else if (event.eventType === "UPDATE") {
         setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, ...msg } : m)));
       }
@@ -213,14 +267,16 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     onMessageEvent: handleMessageEvent,
   });
 
-  const handleSelectConversation = useCallback((conversation: WhatsAppConversation) => {
-    activeIdRef.current = conversation.id;
-    setActiveId((prev) => (prev === conversation.id ? prev : conversation.id));
+  const handleSelectConversation = useCallback((item: InboxItem) => {
+    activeIdRef.current = item.id;
+    activeMemberIdsRef.current = item.kind === "pair" ? [item.outbound.id, item.inbound.id] : [item.conversation.id];
+    setActiveId((prev) => (prev === item.id ? prev : item.id));
     setDetailsOpen(false);
   }, []);
 
   const handleBack = useCallback(() => {
     activeIdRef.current = null;
+    activeMemberIdsRef.current = [];
     setActiveId(null);
     setDetailsOpen(false);
   }, []);
@@ -246,7 +302,7 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
         )}
       >
         <ConversationList
-          conversations={conversations}
+          conversations={items}
           loading={conversationsLoading}
           activeConversationId={activeId}
           channelNames={channelNames}
@@ -260,7 +316,7 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
           hasActiveConversation ? "flex" : "hidden xl:flex",
         )}
       >
-        {hasActiveConversation && (
+        {activeConversation && (
           <div className="flex shrink-0 justify-end border-b border-border bg-card px-3 py-1.5 xl:hidden">
             <Button variant="outline" size="sm" onClick={() => setDetailsOpen(true)}>
               <ContactRound aria-hidden="true" /> Detalhes e notas
@@ -271,7 +327,9 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
           <MessageThread
             envioReal={envioReal}
             conversation={activeConversation}
+            linkedPair={activePair}
             messages={messages}
+            messagesError={messagesError}
             loading={messagesLoading}
             onMessageSent={handleMessageSent}
             onConversationChanged={handleConversationChanged}
@@ -280,8 +338,8 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
         </div>
       </div>
 
-      <LeadSidebar conversation={activeConversation} currentUserId={currentUserId}
-        mobileOpen={detailsOpen} onMobileOpenChange={setDetailsOpen} />
+      {!activePair && <LeadSidebar conversation={activeConversation} currentUserId={currentUserId}
+        mobileOpen={detailsOpen} onMobileOpenChange={setDetailsOpen} />}
     </div>
   );
 }

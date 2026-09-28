@@ -26,6 +26,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type {
   InboxFilter,
   WhatsAppConversation,
+  WhatsAppConversationPair,
   WhatsAppInternalNote,
   WhatsAppLeadSummary,
   WhatsAppMessage,
@@ -74,6 +75,44 @@ export const MESSAGE_SELECT = `
 `.trim()
 
 export const NOTE_SELECT = `id, conversation_id, autor_id, conteudo, created_at`
+
+export const PAIR_SELECT = `id, tenant_id, outbound_conversation_id, inbound_conversation_id, outbound_message_id, inbound_message_id, status_webhook_event_id, inbound_webhook_event_id, linked_by, linked_at`
+
+export type InboxItem =
+  | { kind: 'single'; id: string; conversation: WhatsAppConversation }
+  | { kind: 'pair'; id: string; pair: WhatsAppConversationPair; outbound: WhatsAppConversation; inbound: WhatsAppConversation; conversation: WhatsAppConversation }
+
+/** Collapse only when both member conversations were returned under the user's RLS. */
+export function buildInboxItems(conversations: WhatsAppConversation[], pairs: WhatsAppConversationPair[]): InboxItem[] {
+  const byId = new Map(conversations.map(conversation => [conversation.id, conversation]))
+  const claimed = new Set<string>()
+  const items: InboxItem[] = []
+  for (const pair of pairs) {
+    const outbound = byId.get(pair.outbound_conversation_id)
+    const inbound = byId.get(pair.inbound_conversation_id)
+    if (!outbound || !inbound || outbound.id === inbound.id || claimed.has(outbound.id) || claimed.has(inbound.id)) continue
+    if (outbound.tenant_id !== pair.tenant_id || inbound.tenant_id !== pair.tenant_id || outbound.canal_id !== inbound.canal_id) continue
+    claimed.add(outbound.id)
+    claimed.add(inbound.id)
+    const latest = Date.parse(outbound.ultima_mensagem_em ?? outbound.created_at) > Date.parse(inbound.ultima_mensagem_em ?? inbound.created_at) ? outbound : inbound
+    items.push({ kind: 'pair', id: `pair:${pair.id}`, pair, outbound, inbound, conversation: {
+      ...inbound,
+      ultima_mensagem_em: latest.ultima_mensagem_em,
+      ultima_mensagem_preview: latest.ultima_mensagem_preview,
+      nao_lidas_corretor: outbound.nao_lidas_corretor + inbound.nao_lidas_corretor,
+      optout_em: outbound.optout_em ?? inbound.optout_em,
+    } })
+  }
+  for (const conversation of conversations) {
+    if (!claimed.has(conversation.id)) items.push({ kind: 'single', id: conversation.id, conversation })
+  }
+  return items
+}
+
+export function mergePairedMessages(outbound: WhatsAppMessage[], inbound: WhatsAppMessage[]): WhatsAppMessage[] {
+  return [...new Map([...outbound, ...inbound].map(message => [message.id, message])).values()]
+    .sort((a, b) => Date.parse(a.wpp_timestamp ?? a.created_at) - Date.parse(b.wpp_timestamp ?? b.created_at) || a.id.localeCompare(b.id))
+}
 
 /** Raw shape PostgREST returns for {@link CONVERSATION_SELECT} before normalizing. */
 interface RawLead {
@@ -198,6 +237,15 @@ export async function fetchConversations(
   return { data: normalizeConversationRows((data ?? []) as unknown as RawConversation[]), error: null }
 }
 
+/** SELECT uses the caller's session. The pair RLS requires visibility of both members. */
+export async function fetchConversationPairs(
+  supabase: SupabaseClient,
+): Promise<{ data: WhatsAppConversationPair[]; error: string | null }> {
+  const { data, error } = await supabase.from('whatsapp_conversation_pairs').select(PAIR_SELECT)
+  if (error) return { data: [], error: error.message }
+  return { data: (data ?? []) as WhatsAppConversationPair[], error: null }
+}
+
 /** Re-fetch a single conversation WITH its lead/corretor join. Used by the
  *  realtime handler: a `postgres_changes` payload only carries the row's own
  *  columns (no join), so an INSERT/UPDATE event re-fetches through here to
@@ -232,6 +280,37 @@ export async function fetchMessages(
 
   if (error) return { data: [], error: error.message }
   return { data: (data ?? []) as unknown as WhatsAppMessage[], error: null }
+}
+
+export async function fetchPairedMessages(
+  supabase: SupabaseClient,
+  pair: WhatsAppConversationPair,
+): Promise<{ data: WhatsAppMessage[]; error: string | null }> {
+  // Revalidate the RLS-scoped link and both member rows immediately before
+  // assembling history; a stale browser list must not show a one-sided link.
+  const [{ data: currentPair, error: pairError }, outboundConversation, inboundConversation] = await Promise.all([
+    supabase.from('whatsapp_conversation_pairs').select(PAIR_SELECT).eq('id', pair.id).maybeSingle(),
+    fetchConversationById(supabase, pair.outbound_conversation_id),
+    fetchConversationById(supabase, pair.inbound_conversation_id),
+  ])
+  if (pairError || !currentPair || !outboundConversation || !inboundConversation ||
+    currentPair.outbound_conversation_id !== pair.outbound_conversation_id ||
+    currentPair.inbound_conversation_id !== pair.inbound_conversation_id ||
+    currentPair.tenant_id !== outboundConversation.tenant_id ||
+    currentPair.tenant_id !== inboundConversation.tenant_id ||
+    outboundConversation.canal_id !== inboundConversation.canal_id) {
+    return { data: [], error: 'Vínculo indisponível para esta sessão.' }
+  }
+  const [outbound, inbound] = await Promise.all([
+    fetchMessages(supabase, pair.outbound_conversation_id),
+    fetchMessages(supabase, pair.inbound_conversation_id),
+  ])
+  if (outbound.error || inbound.error) return { data: [], error: outbound.error ?? inbound.error }
+  if (!outbound.data.some(message => message.id === pair.outbound_message_id) ||
+    !inbound.data.some(message => message.id === pair.inbound_message_id)) {
+    return { data: [], error: 'Histórico vinculado indisponível para esta sessão.' }
+  }
+  return { data: mergePairedMessages(outbound.data, inbound.data), error: null }
 }
 
 export async function fetchInternalNotes(

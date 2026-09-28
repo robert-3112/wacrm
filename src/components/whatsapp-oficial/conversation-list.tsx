@@ -32,7 +32,8 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { leadDisplayName, matchesInboxFilter, matchesSearch } from "@/lib/whatsapp-oficial/inbox-data";
-import type { InboxFilter, WhatsAppConversation, WhatsAppConversationStatus } from "@/types/whatsapp-oficial";
+import type { InboxItem } from "@/lib/whatsapp-oficial/inbox-data";
+import type { InboxFilter, WhatsAppConversationStatus } from "@/types/whatsapp-oficial";
 
 const FILTER_OPTIONS: { value: InboxFilter; label: string }[] = [
   { value: "todas", label: "Todas" },
@@ -56,11 +57,11 @@ const STATUS_DOT: Record<WhatsAppConversationStatus, string> = {
 };
 
 interface ConversationListProps {
-  conversations: WhatsAppConversation[];
+  conversations: InboxItem[];
   loading: boolean;
   activeConversationId: string | null;
   channelNames: Record<string, string>;
-  onSelect: (conversation: WhatsAppConversation) => void;
+  onSelect: (conversation: InboxItem) => void;
 }
 
 export function ConversationList({
@@ -74,22 +75,22 @@ export function ConversationList({
   const [filter, setFilter] = useState<ListFilter>("todas");
   const [channelId, setChannelId] = useState("todos");
 
-  const channels = useMemo(() => [...new Set(conversations.map((c) => c.canal_id))]
+  const channels = useMemo(() => [...new Set(conversations.map((item) => item.conversation.canal_id))]
     .sort()
     .map((id, index) => ({ id, name: channelNames[id] || `Canal ${index + 1}` })),
   [conversations, channelNames]);
 
   const filtered = useMemo(() => {
     return conversations.filter(
-      (c) => (channelId === "todos" || c.canal_id === channelId)
-        && (filter === "nao_lidas" ? c.nao_lidas_corretor > 0 || c.id === activeConversationId : matchesInboxFilter(c, filter))
-        && matchesSearch(c, search),
-    ).sort((a, b) => Date.parse(b.ultima_mensagem_em ?? b.created_at) - Date.parse(a.ultima_mensagem_em ?? a.created_at));
+      (item) => (channelId === "todos" || item.conversation.canal_id === channelId)
+        && (filter === "nao_lidas" ? item.conversation.nao_lidas_corretor > 0 || item.id === activeConversationId : matchesInboxFilter(item.conversation, filter))
+        && (matchesSearch(item.conversation, search) || (item.kind === "pair" && matchesSearch(item.outbound, search))),
+    ).sort((a, b) => Date.parse(b.conversation.ultima_mensagem_em ?? b.conversation.created_at) - Date.parse(a.conversation.ultima_mensagem_em ?? a.conversation.created_at));
   }, [conversations, filter, search, channelId, activeConversationId]);
 
   const activeFilterLabel = LIST_FILTER_OPTIONS.find((f) => f.value === filter)?.label ?? "Todas";
   const activeChannelLabel = channels.find((c) => c.id === channelId)?.name ?? "Todos os canais";
-  const unread = conversations.reduce((count, c) => count + c.nao_lidas_corretor, 0);
+  const unread = conversations.reduce((count, item) => count + item.conversation.nao_lidas_corretor, 0);
 
   return (
     <div className="flex h-full w-full flex-col border-r border-border bg-card xl:w-80">
@@ -176,12 +177,12 @@ export function ConversationList({
           </div>
         ) : (
           <div className="flex flex-col">
-            {filtered.map((conversation) => (
+            {filtered.map((item) => (
               <ConversationRow
-                key={conversation.id}
-                conversation={conversation}
-                isActive={conversation.id === activeConversationId}
-                channelName={channels.length > 1 ? channels.find((c) => c.id === conversation.canal_id)?.name : null}
+                key={item.id}
+                item={item}
+                isActive={item.id === activeConversationId}
+                channelName={channels.length > 1 ? channels.find((c) => c.id === item.conversation.canal_id)?.name : null}
                 onSelect={onSelect}
               />
             ))}
@@ -193,16 +194,17 @@ export function ConversationList({
 }
 
 function ConversationRow({
-  conversation,
+  item,
   isActive,
   channelName,
   onSelect,
 }: {
-  conversation: WhatsAppConversation;
+  item: InboxItem;
   isActive: boolean;
   channelName?: string | null;
-  onSelect: (conversation: WhatsAppConversation) => void;
+  onSelect: (conversation: InboxItem) => void;
 }) {
+  const conversation = item.conversation;
   const name = leadDisplayName(conversation);
   const initials = name.charAt(0).toUpperCase();
   const urgente = conversation.lead?.urgente === true;
@@ -218,7 +220,7 @@ function ConversationRow({
       type="button"
       aria-pressed={isActive}
       aria-label={`Abrir conversa com ${name}${unread ? `, ${conversation.nao_lidas_corretor} mensagens não lidas` : ""}`}
-      onClick={() => onSelect(conversation)}
+      onClick={() => onSelect(item)}
       className={cn(
         "flex w-full items-start gap-3 border-b border-border/50 px-3 py-3 text-left transition-colors hover:bg-muted/50",
         isActive && "border-l-2 border-primary bg-muted/70",
@@ -261,7 +263,8 @@ function ConversationRow({
             )}
           </div>
         </div>
-        {(semDono || channelName) && <div className="mt-1 flex min-w-0 items-center gap-1.5">
+        {(item.kind === "pair" || semDono || channelName) && <div className="mt-1 flex min-w-0 items-center gap-1.5">
+          {item.kind === "pair" && <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">Visão vinculada</span>}
           {semDono && <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">Sem dono</span>}
           {channelName && <span className="truncate text-[10px] text-muted-foreground">{channelName}</span>}
         </div>}

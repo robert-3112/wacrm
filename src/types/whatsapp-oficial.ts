@@ -80,6 +80,21 @@ export interface WhatsAppConversation {
   lead: WhatsAppLeadSummary | null
 }
 
+/** Verified 11-digit outbound / 10-digit inbound link. SELECT is RLS-scoped
+ * to sessions that can independently see both conversations. */
+export interface WhatsAppConversationPair {
+  id: string
+  tenant_id: string
+  outbound_conversation_id: string
+  inbound_conversation_id: string
+  outbound_message_id: string
+  inbound_message_id: string
+  status_webhook_event_id: string | null
+  inbound_webhook_event_id: string | null
+  linked_by: string | null
+  linked_at: string
+}
+
 export interface WhatsAppMessage {
   id: string
   tenant_id: string

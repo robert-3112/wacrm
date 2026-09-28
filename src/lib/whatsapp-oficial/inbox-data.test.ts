@@ -1,11 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
+  buildInboxItems,
+  fetchPairedMessages,
+  mergePairedMessages,
   leadDisplayName,
   matchesInboxFilter,
   matchesSearch,
   normalizeConversationRow,
 } from './inbox-data'
-import type { WhatsAppConversation } from '@/types/whatsapp-oficial'
+import type { WhatsAppConversation, WhatsAppConversationPair, WhatsAppMessage } from '@/types/whatsapp-oficial'
 
 function makeConversation(
   overrides: Partial<WhatsAppConversation> = {},
@@ -189,5 +192,73 @@ describe('matchesSearch', () => {
 
   it('an empty query matches everything', () => {
     expect(matchesSearch(makeConversation(), '   ')).toBe(true)
+  })
+})
+
+const pair: WhatsAppConversationPair = {
+  id: 'pair-1', tenant_id: 'sunt', outbound_conversation_id: 'out', inbound_conversation_id: 'in',
+  outbound_message_id: 'message-out', inbound_message_id: 'message-in',
+  status_webhook_event_id: null, inbound_webhook_event_id: null,
+  linked_by: null, linked_at: '2026-07-01T00:00:00Z',
+}
+
+describe('paired inbox view', () => {
+  it('collapses only a verified pair with both RLS-visible members and retains source IDs', () => {
+    const outbound = makeConversation({ id: 'out', ultima_mensagem_em: '2026-07-01T01:00:00Z', nao_lidas_corretor: 1 })
+    const inbound = makeConversation({ id: 'in', ultima_mensagem_em: '2026-07-01T02:00:00Z', nao_lidas_corretor: 2, optout_em: '2026-07-01T03:00:00Z' })
+    const [item] = buildInboxItems([outbound, inbound], [pair])
+    expect(item.kind).toBe('pair')
+    if (item.kind !== 'pair') return
+    expect(item.outbound.id).toBe('out')
+    expect(item.inbound.id).toBe('in')
+    expect(item.conversation.nao_lidas_corretor).toBe(3)
+    expect(item.conversation.optout_em).toBe(inbound.optout_em)
+    expect(item.conversation.ultima_mensagem_em).toBe(inbound.ultima_mensagem_em)
+    expect(buildInboxItems([outbound], [pair]).map(item => item.id)).toEqual(['out'])
+    expect(buildInboxItems([outbound, { ...inbound, tenant_id: 'other' }], [pair]).map(item => item.id)).toEqual(['out', 'in'])
+  })
+
+  it('keeps a standalone conversation and blocks pairing across channels', () => {
+    const outbound = makeConversation({ id: 'out' })
+    const inbound = makeConversation({ id: 'in', canal_id: 'other-channel' })
+    expect(buildInboxItems([outbound, inbound], [pair]).every(item => item.kind === 'single')).toBe(true)
+  })
+
+  it('orders each original message by provider time, then creation time', () => {
+    const message = (id: string, conversation_id: string, created_at: string, wpp_timestamp: string | null = null) =>
+      ({ id, conversation_id, created_at, wpp_timestamp } as WhatsAppMessage)
+    const result = mergePairedMessages(
+      [message('first', 'out', '2026-07-01T04:00:00Z', '2026-07-01T01:00:00Z')],
+      [message('second', 'in', '2026-07-01T02:00:00Z')],
+    )
+    expect(result.map(message => [message.id, message.conversation_id])).toEqual([['first', 'out'], ['second', 'in']])
+  })
+
+  it('does not read either history when one member is no longer RLS-visible', async () => {
+    const messageSelect = vi.fn()
+    const supabase = { from: (table: string) => ({ select: () => {
+      if (table === 'whatsapp_messages') { messageSelect(); return {} }
+      return { eq: (_column: string, id: string) => ({ maybeSingle: async () => ({
+        data: table === 'whatsapp_conversation_pairs' ? pair : id === 'out' ? makeConversation({ id: 'out' }, null) : null,
+        error: null,
+      }) }) }
+    } }) }
+    const result = await fetchPairedMessages(supabase as never, pair)
+    expect(result.data).toEqual([])
+    expect(result.error).toMatch(/indisponível/)
+    expect(messageSelect).not.toHaveBeenCalled()
+  })
+
+  it('rejects a partial history when the verified inbound anchor is not visible', async () => {
+    const supabase = { from: (table: string) => ({ select: () => ({
+      eq: (_column: string, id: string) => table === 'whatsapp_messages'
+        ? { order: async () => ({ data: id === 'out' ? [{ id: 'message-out' }] : [], error: null }) }
+        : { maybeSingle: async () => ({
+          data: table === 'whatsapp_conversation_pairs' ? pair : makeConversation({ id }, null), error: null,
+        }) },
+    }) }) }
+    const result = await fetchPairedMessages(supabase as never, pair)
+    expect(result.data).toEqual([])
+    expect(result.error).toMatch(/indisponível/)
   })
 })
