@@ -155,6 +155,17 @@ const TEMPLATE_LIFECYCLE_FIELDS = new Set([
   'message_template_components_update',
 ])
 
+// Coexistence fields have different payloads from `messages`: app replies are
+// outbound echoes, history contains both directions, and state_sync contains
+// contacts. Until their dedicated DB contract exists they must stay raw-only.
+// Meta requires all three subscriptions for Business App onboarding, but do
+// not subscribe the app until the quarantined records have a consumer.
+const COEX_FIELDS = new Set([
+  'smb_message_echoes',
+  'history',
+  'smb_app_state_sync',
+])
+
 // ============================================================
 // GET — hub.challenge verification
 // ============================================================
@@ -268,8 +279,10 @@ export async function processWebhookBody(
             change.value as MetaTemplateLifecycleValue,
             admin,
           )
-        } else {
+        } else if (change.field === 'messages') {
           await processMessagingChange(change.value as MetaWebhookChangeValue, admin)
+        } else {
+          await quarantineUnintegratedChange(entry, change.field, change.value, admin)
         }
       } catch (error) {
         const detalhe = error instanceof Error ? error.message : String(error)
@@ -291,6 +304,79 @@ export async function processWebhookBody(
       `${falhasTransitorias.length} evento(s) do lote falharam: ${falhasTransitorias.join(' | ')}`,
     )
   }
+}
+
+/**
+ * Durably retain signed fields we cannot yet project into the CRM. In
+ * particular, a Business App echo must never be mistaken for a customer
+ * inbound message. processed_at stays NULL so a future backfill can locate
+ * these rows; returning 200 prevents a retry storm while the feature is
+ * deliberately disabled. No AI, lead, conversation, or outbox RPC is called.
+ */
+async function quarantineUnintegratedChange(
+  entry: MetaWebhookEntry,
+  field: string,
+  value: unknown,
+  admin: SupabaseClient,
+): Promise<void> {
+  const payload = { waba_id: entry.id, field, value }
+  const metadata =
+    value && typeof value === 'object' && 'metadata' in value
+      ? (value.metadata as { phone_number_id?: unknown } | null)
+      : null
+  const phoneNumberId =
+    typeof metadata?.phone_number_id === 'string'
+      ? metadata.phone_number_id
+      : null
+
+  let channels: ChannelRow[]
+  if (phoneNumberId) {
+    const { data, error } = await admin
+      .from('whatsapp_channels')
+      .select('id, tenant_id, status')
+      .eq('phone_number_id', phoneNumberId)
+      .eq('waba_id', entry.id)
+    if (error)
+      throw new Error(`failed to resolve quarantined field: ${error.message}`)
+    channels = (data ?? []) as ChannelRow[]
+  } else {
+    channels = await findChannelsByWabaId(entry.id, admin)
+  }
+
+  // A raw event must belong to exactly one tenant/channel before storage.
+  // WABA-level fields without phone_number_id are ambiguous when the WABA has
+  // multiple channels. Return 503; do not subscribe those fields until their
+  // account-level persistence contract exists.
+  if (channels.length !== 1) {
+    throw new Error(
+      `cannot uniquely resolve channel for webhook field ${field}`
+    )
+  }
+
+  const channel = channels[0]
+  const externalId = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(payload))
+    .digest('hex')
+  const eventType =
+    field === 'smb_app_state_sync' ? 'account_update' : 'unknown'
+  const reason = COEX_FIELDS.has(field)
+    ? `coexistence field ${field} quarantined until CRM integration is enabled`
+    : `unknown webhook field ${field} quarantined`
+  const { error } = await admin.from('whatsapp_webhook_events').insert({
+    tenant_id: channel.tenant_id,
+    canal_id: channel.id,
+    event_type: eventType,
+    external_id: externalId,
+    payload,
+    processing_error: reason,
+  })
+  if (error && !isUniqueViolation(error)) {
+    throw new Error(
+      `failed to quarantine webhook field ${field}: ${error.message}`
+    )
+  }
+  if (!error) console.warn(`[whatsapp-oficial/webhook] ${reason}`)
 }
 
 /**

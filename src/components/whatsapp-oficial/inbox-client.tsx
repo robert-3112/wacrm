@@ -14,10 +14,8 @@
  * a `hydrateConversation` self-heal fetch on realtime events whose payload
  * doesn't carry the `lead` join, a mobile single-pane fallback) but
  * rebuilt against this schema's data shape and the mission's reduced
- * scope: no deep-link URL sync, no contact-panel collapse toggle, no
- * WhatsApp-connection banner — none of those are mission requirements, and
- * this inbox is small enough (one tenant, one official channel) that they
- * would be complexity without a corresponding need.
+ * scope: no deep-link URL sync or WhatsApp-connection banner. The list can
+ * contain multiple channels; details and notes remain accessible on mobile.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -34,6 +32,8 @@ import { ConversationList } from "./conversation-list";
 import { MessageThread } from "./message-thread";
 import { LeadSidebar } from "./lead-sidebar";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { ContactRound } from "lucide-react";
 import type { WhatsAppConversation, WhatsAppMessage } from "@/types/whatsapp-oficial";
 
 export function InboxClient({ envioReal }: { envioReal: boolean }) {
@@ -43,6 +43,41 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
   const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [channelNames, setChannelNames] = useState<Record<string, string>>({});
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
+  // Dismiss the mobile drawer if the viewport grows to the three-pane layout.
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 1280px)");
+    const closeOnDesktop = () => { if (desktop.matches) setDetailsOpen(false); };
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => desktop.removeEventListener("change", closeOnDesktop);
+  }, []);
+
+  const channelIdsKey = useMemo(
+    () => [...new Set(conversations.map((conversation) => conversation.canal_id))].sort().join(","),
+    [conversations],
+  );
+
+  // Channel metadata is safe to display. A corretor may lack SELECT access
+  // to whatsapp_channels; the list still works with neutral channel labels.
+  useEffect(() => {
+    if (!channelIdsKey) return;
+    let cancelled = false;
+    (async () => {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("whatsapp_channels")
+        .select("id, nome, numero_display")
+        .in("id", channelIdsKey.split(","));
+      if (cancelled || !data) return;
+      setChannelNames(Object.fromEntries(data.map((channel) => [
+        channel.id,
+        [channel.nome, channel.numero_display].filter(Boolean).join(" · "),
+      ])));
+    })();
+    return () => { cancelled = true; };
+  }, [channelIdsKey]);
 
   const activeConversation = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -181,11 +216,13 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
   const handleSelectConversation = useCallback((conversation: WhatsAppConversation) => {
     activeIdRef.current = conversation.id;
     setActiveId((prev) => (prev === conversation.id ? prev : conversation.id));
+    setDetailsOpen(false);
   }, []);
 
   const handleBack = useCallback(() => {
     activeIdRef.current = null;
     setActiveId(null);
+    setDetailsOpen(false);
   }, []);
 
   const handleMessageSent = useCallback((message: WhatsAppMessage) => {
@@ -212,28 +249,39 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
           conversations={conversations}
           loading={conversationsLoading}
           activeConversationId={activeId}
+          channelNames={channelNames}
           onSelect={handleSelectConversation}
         />
       </div>
 
       <div
         className={cn(
-          "h-full min-w-0 flex-1 xl:flex",
+          "h-full min-w-0 flex-1 flex-col xl:flex",
           hasActiveConversation ? "flex" : "hidden xl:flex",
         )}
       >
-        <MessageThread
-          envioReal={envioReal}
-          conversation={activeConversation}
-          messages={messages}
-          loading={messagesLoading}
-          onMessageSent={handleMessageSent}
-          onConversationChanged={handleConversationChanged}
-          onBack={handleBack}
-        />
+        {hasActiveConversation && (
+          <div className="flex shrink-0 justify-end border-b border-border bg-card px-3 py-1.5 xl:hidden">
+            <Button variant="outline" size="sm" onClick={() => setDetailsOpen(true)}>
+              <ContactRound aria-hidden="true" /> Detalhes e notas
+            </Button>
+          </div>
+        )}
+        <div className="min-h-0 flex-1">
+          <MessageThread
+            envioReal={envioReal}
+            conversation={activeConversation}
+            messages={messages}
+            loading={messagesLoading}
+            onMessageSent={handleMessageSent}
+            onConversationChanged={handleConversationChanged}
+            onBack={handleBack}
+          />
+        </div>
       </div>
 
-      <LeadSidebar conversation={activeConversation} currentUserId={currentUserId} />
+      <LeadSidebar conversation={activeConversation} currentUserId={currentUserId}
+        mobileOpen={detailsOpen} onMobileOpenChange={setDetailsOpen} />
     </div>
   );
 }

@@ -19,6 +19,7 @@ import {
   acaoCampanha,
   criarCampanha,
   gerarDestinatarios,
+  listarCampanhas,
   listarTemplates,
   montarConfigCampanha,
   montarCorpoCampanha,
@@ -160,6 +161,12 @@ describe('montarValoresPreview', () => {
 })
 
 // ---------------------------------------------------------------- campanhas
+
+it('lista de campanhas preserva o aviso de truncamento da API', async () => {
+  mockFetch({ body: { ok: true, campanhas: [], truncado: true } })
+  const resultado = await listarCampanhas({ canalId: CANAL_ID, status: 'todos' })
+  expect(resultado.ok && resultado.data.truncado).toBe(true)
+})
 
 describe('montarConfigCampanha', () => {
   const publico = { modo: 'segmento', confirmado: true }
