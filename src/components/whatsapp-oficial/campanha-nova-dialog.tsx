@@ -22,6 +22,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -54,6 +55,7 @@ import {
   type FormularioCampanha,
   type LeadCampanha,
 } from "@/lib/whatsapp-oficial/gestao-actions";
+import { parseLeadCsv } from "@/lib/whatsapp-oficial/import-csv";
 import {
   camposFaltando,
   derivarCamposTemplate,
@@ -110,11 +112,104 @@ const SEM_TEMPLATE = "__sem_template__";
 const ETAPAS_CAMPANHA = ["Público", "Mensagem", "Regras", "Revisão"] as const;
 type EtapaCampanha = 0 | 1 | 2 | 3;
 
+type ResolucaoCsv = {
+  leads: LeadCampanha[];
+  encontrados: number;
+  ausentes: number;
+  ambiguos: number;
+  duplicados: number;
+  invalidos: number;
+};
+
+export function mesclarLeadsCsv(atuais: LeadCampanha[], resolvidos: LeadCampanha[]) {
+  const idsAtuais = new Set(atuais.map((lead) => lead.id));
+  const ids = new Set(idsAtuais);
+  const selecionados = [...atuais];
+  let jaSelecionados = 0;
+  let semEspaco = 0;
+  for (const lead of resolvidos) {
+    if (ids.has(lead.id)) {
+      if (idsAtuais.has(lead.id)) jaSelecionados += 1;
+    } else {
+      ids.add(lead.id);
+      if (selecionados.length < 500) selecionados.push(lead);
+      else semEspaco += 1;
+    }
+  }
+  return { selecionados, adicionados: selecionados.length - atuais.length, jaSelecionados, semEspaco };
+}
+
+function resolucaoCsvValida(valor: unknown): valor is ResolucaoCsv {
+  if (!valor || typeof valor !== "object") return false;
+  const dados = valor as Record<string, unknown>;
+  if (!Array.isArray(dados.leads) || !dados.leads.every((lead) =>
+    lead && typeof lead === "object" &&
+    typeof lead.id === "string" && lead.id.length > 0 &&
+    typeof lead.nome === "string" && typeof lead.telefone === "string"
+  )) return false;
+  return ["encontrados", "ausentes", "ambiguos", "duplicados", "invalidos"].every(
+    (campo) => Number.isInteger(dados[campo]) && (dados[campo] as number) >= 0,
+  );
+}
+
+function anunciosValidos(valor: unknown): valor is { anuncios: string[]; truncado: boolean } {
+  if (!valor || typeof valor !== "object") return false;
+  const dados = valor as Record<string, unknown>;
+  return Array.isArray(dados.anuncios) && dados.anuncios.every((nome) =>
+    typeof nome === "string" && nome.length > 0
+  ) && typeof dados.truncado === "boolean";
+}
+
+export function publicoAnuncioValido(valor: unknown): valor is { leads: LeadCampanha[]; total: number } {
+  if (!valor || typeof valor !== "object") return false;
+  const dados = valor as Record<string, unknown>;
+  return Number.isInteger(dados.total) && (dados.total as number) >= 0 && (dados.total as number) <= 500 &&
+    Array.isArray(dados.leads) && dados.leads.length <= 500 &&
+    dados.leads.every((lead) => lead && typeof lead === "object" &&
+      typeof lead.id === "string" && lead.id.length > 0 &&
+      typeof lead.nome === "string" &&
+      (typeof lead.telefone === "string" || lead.telefone === null));
+}
+
 function paraNumero(valor: string): number | null {
   const t = valor.trim();
   if (!t) return null;
   const n = Number(t);
   return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** Interpreta o dia escolhido no fuso do dispositivo, inclusive o último instante do dia final. */
+export function serializarPeriodoCriacao(de: string, ate: string): {
+  criadoDe?: string;
+  criadoAte?: string;
+} {
+  const converter = (valor: string, fim: boolean): string | undefined => {
+    if (!valor) return undefined;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(valor)) {
+      throw new Error("Informe uma data de criação válida.");
+    }
+    const [ano, mes, dia] = valor.split("-").map(Number);
+    const data = new Date(0);
+    data.setFullYear(ano, mes - 1, dia);
+    data.setHours(fim ? 23 : 0, fim ? 59 : 0, fim ? 59 : 0, fim ? 999 : 0);
+    if (
+      ano < 1 || data.getFullYear() !== ano || data.getMonth() !== mes - 1 ||
+      data.getDate() !== dia
+    ) {
+      throw new Error("Informe uma data de criação válida.");
+    }
+    const iso = data.toISOString();
+    // PostgreSQL armazena microssegundos; .999Z excluiria os últimos 999µs
+    // do dia apesar de o formulário prometer o dia inteiro.
+    return fim ? iso.replace(/\.999Z$/, ".999999Z") : iso;
+  };
+
+  const criadoDe = converter(de, false);
+  const criadoAte = converter(ate, true);
+  if (de && ate && de > ate) {
+    throw new Error("A data inicial de criação deve ser anterior ou igual à data final.");
+  }
+  return { criadoDe, criadoAte };
 }
 
 export function CampanhaNovaDialog({
@@ -156,6 +251,9 @@ export function CampanhaNovaDialog({
   const [etapas, setEtapas] = useState("");
   const [temperaturas, setTemperaturas] = useState("");
   const [tags, setTags] = useState("");
+  const [origens, setOrigens] = useState("");
+  const [criadoDe, setCriadoDe] = useState("");
+  const [criadoAte, setCriadoAte] = useState("");
   const [semCorretor, setSemCorretor] = useState(false);
   const [valoresVars, setValoresVars] = useState<ValoresCampos>({});
   const [busca, setBusca] = useState("");
@@ -167,6 +265,30 @@ export function CampanhaNovaDialog({
   const [buscaFeita, setBuscaFeita] = useState(false);
   const [buscaTruncada, setBuscaTruncada] = useState(false);
   const [erroBusca, setErroBusca] = useState<string | null>(null);
+  const [resolvendoCsv, setResolvendoCsv] = useState(false);
+  const [erroCsv, setErroCsv] = useState<string | null>(null);
+  const [resultadoCsv, setResultadoCsv] = useState<{
+    arquivo: string;
+    contagem: ResolucaoCsv;
+    adicionados: number;
+    jaSelecionados: number;
+    semEspaco: number;
+  } | null>(null);
+  const [buscaAnuncio, setBuscaAnuncio] = useState("");
+  const [anuncios, setAnuncios] = useState<string[]>([]);
+  const [anuncioEscolhido, setAnuncioEscolhido] = useState("");
+  const [buscandoAnuncios, setBuscandoAnuncios] = useState(false);
+  const [buscaAnunciosFeita, setBuscaAnunciosFeita] = useState(false);
+  const [anunciosTruncados, setAnunciosTruncados] = useState(false);
+  const [erroAnuncio, setErroAnuncio] = useState<string | null>(null);
+  const [puxandoAnuncio, setPuxandoAnuncio] = useState(false);
+  const [resultadoAnuncio, setResultadoAnuncio] = useState<{
+    anuncio: string;
+    total: number;
+    adicionados: number;
+    jaSelecionados: number;
+    semEspaco: number;
+  } | null>(null);
   const [agendadoPara, setAgendadoPara] = useState("");
   const [preview, setPreview] = useState<{
     chave: string;
@@ -174,10 +296,17 @@ export function CampanhaNovaDialog({
   } | null>(null);
   const [carregandoPreview, setCarregandoPreview] = useState(false);
   const buscaAbort = useRef<AbortController | null>(null);
+  const csvAbort = useRef<AbortController | null>(null);
+  const anunciosAbort = useRef<AbortController | null>(null);
+  const publicoAnuncioAbort = useRef<AbortController | null>(null);
+  const csvInput = useRef<HTMLInputElement>(null);
   const previewAbort = useRef<AbortController | null>(null);
   useEffect(
     () => () => {
       buscaAbort.current?.abort();
+      csvAbort.current?.abort();
+      anunciosAbort.current?.abort();
+      publicoAnuncioAbort.current?.abort();
       previewAbort.current?.abort();
     },
     [],
@@ -222,6 +351,13 @@ export function CampanhaNovaDialog({
   } catch (e) {
     erroAgendamento = e instanceof Error ? e.message : "Confira o agendamento.";
   }
+  let erroPeriodo: string | null = null;
+  let periodoCriacao: ReturnType<typeof serializarPeriodoCriacao> = {};
+  try {
+    periodoCriacao = serializarPeriodoCriacao(criadoDe, criadoAte);
+  } catch (e) {
+    erroPeriodo = e instanceof Error ? e.message : "Confira as datas de criação.";
+  }
 
   /**
    * Por que o botão está desligado, em português e à vista.
@@ -239,8 +375,11 @@ export function CampanhaNovaDialog({
   if (!nome.trim()) faltasPublico.push('dar um nome à campanha');
   if (modoPublico === 'selecionados' && selecionados.length === 0)
     faltasPublico.push('selecionar ao menos um contato do CRM');
+  if (resolvendoCsv) faltasPublico.push('aguardar a conferência do CSV');
+  if (puxandoAnuncio) faltasPublico.push('aguardar os contatos do anúncio');
   if (modoPublico === 'segmento' && !confirmarSegmento)
     faltasPublico.push('confirmar o escopo do segmento do CRM');
+  if (erroPeriodo) faltasPublico.push(erroPeriodo);
   if (erroAgendamento) faltasRegras.push(erroAgendamento);
   if (
     templateId !== SEM_TEMPLATE &&
@@ -313,9 +452,16 @@ export function CampanhaNovaDialog({
     setEtapas("");
     setTemperaturas("");
     setTags("");
+    setOrigens("");
+    setCriadoDe("");
+    setCriadoAte("");
     setSemCorretor(false);
     setValoresVars({});
     buscaAbort.current?.abort();
+    csvAbort.current?.abort();
+    anunciosAbort.current?.abort();
+    publicoAnuncioAbort.current?.abort();
+    if (csvInput.current) csvInput.current.value = "";
     previewAbort.current?.abort();
     setBusca("");
     setResultados([]);
@@ -326,6 +472,18 @@ export function CampanhaNovaDialog({
     setBuscando(false);
     setBuscaTruncada(false);
     setErroBusca(null);
+    setResolvendoCsv(false);
+    setErroCsv(null);
+    setResultadoCsv(null);
+    setBuscaAnuncio("");
+    setAnuncios([]);
+    setAnuncioEscolhido("");
+    setBuscandoAnuncios(false);
+    setBuscaAnunciosFeita(false);
+    setAnunciosTruncados(false);
+    setErroAnuncio(null);
+    setPuxandoAnuncio(false);
+    setResultadoAnuncio(null);
     setAgendadoPara("");
     setPreview(null);
     setCarregandoPreview(false);
@@ -366,6 +524,133 @@ export function CampanhaNovaDialog({
       }
     } finally {
       if (!controller.signal.aborted) setBuscando(false);
+    }
+  };
+
+  const limparCsv = () => {
+    csvAbort.current?.abort();
+    if (csvInput.current) csvInput.current.value = "";
+    setResolvendoCsv(false);
+    setErroCsv(null);
+    setResultadoCsv(null);
+  };
+
+  const invalidarPublicoAnuncio = () => {
+    publicoAnuncioAbort.current?.abort();
+    setPuxandoAnuncio(false);
+    setResultadoAnuncio(null);
+    setErroAnuncio(null);
+  };
+
+  const buscarAnuncios = async () => {
+    const q = buscaAnuncio.trim();
+    if (q.length < 2 || q.length > 80) return;
+    anunciosAbort.current?.abort();
+    invalidarPublicoAnuncio();
+    const controller = new AbortController();
+    anunciosAbort.current = controller;
+    setBuscandoAnuncios(true);
+    setBuscaAnunciosFeita(false);
+    setAnuncios([]);
+    setAnuncioEscolhido("");
+    try {
+      const resposta = await fetch(`/api/whatsapp-oficial/campanhas/leads/anuncios?q=${encodeURIComponent(q)}`, {
+        signal: controller.signal,
+      });
+      const dados: unknown = await resposta.json().catch(() => null);
+      if (controller.signal.aborted) return;
+      if (!resposta.ok) throw new Error("Não foi possível buscar os anúncios no CRM.");
+      if (!anunciosValidos(dados)) throw new Error("Resposta inválida ao buscar os anúncios.");
+      setAnuncios(dados.anuncios);
+      setAnunciosTruncados(dados.truncado);
+      setBuscaAnunciosFeita(true);
+    } catch (e) {
+      if (!controller.signal.aborted) setErroAnuncio(e instanceof Error ? e.message : "Não foi possível buscar os anúncios.");
+    } finally {
+      if (!controller.signal.aborted) setBuscandoAnuncios(false);
+    }
+  };
+
+  const puxarContatosAnuncio = async () => {
+    if (!anuncioEscolhido || erroPeriodo || resolvendoCsv) return;
+    publicoAnuncioAbort.current?.abort();
+    const controller = new AbortController();
+    publicoAnuncioAbort.current = controller;
+    setPuxandoAnuncio(true);
+    setErroAnuncio(null);
+    setResultadoAnuncio(null);
+    try {
+      const resposta = await fetch("/api/whatsapp-oficial/campanhas/leads/anuncios", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ anuncio: anuncioEscolhido, ...periodoCriacao }),
+        signal: controller.signal,
+      });
+      const dados: unknown = await resposta.json().catch(() => null);
+      if (controller.signal.aborted) return;
+      if (resposta.status === 422 && dados && typeof dados === "object" && "total" in dados &&
+        typeof dados.total === "number" && dados.total > 500) {
+        throw new Error(`${dados.total} contatos encontrados. Restrinja o período de criação para até 500 e tente novamente.`);
+      }
+      if (!resposta.ok) throw new Error("Não foi possível puxar os contatos do anúncio no CRM.");
+      if (!publicoAnuncioValido(dados)) throw new Error("Resposta inválida ao puxar os contatos.");
+      const mescla = mesclarLeadsCsv(selecionados, dados.leads);
+      setSelecionados(mescla.selecionados);
+      setResultadoAnuncio({
+        anuncio: anuncioEscolhido,
+        total: dados.total,
+        adicionados: mescla.adicionados,
+        jaSelecionados: mescla.jaSelecionados,
+        semEspaco: mescla.semEspaco,
+      });
+    } catch (e) {
+      if (!controller.signal.aborted) setErroAnuncio(e instanceof Error ? e.message : "Não foi possível puxar os contatos.");
+    } finally {
+      if (!controller.signal.aborted) setPuxandoAnuncio(false);
+    }
+  };
+
+  const resolverArquivoCsv = async (file: File) => {
+    csvAbort.current?.abort();
+    const controller = new AbortController();
+    csvAbort.current = controller;
+    setResolvendoCsv(true);
+    setErroCsv(null);
+    setResultadoCsv(null);
+    try {
+      if (file.size > 2_000_000) throw new Error("O arquivo excede 2 MB.");
+      const linhas = parseLeadCsv(await file.text());
+      if (controller.signal.aborted) return;
+      const resposta = await fetch("/api/whatsapp-oficial/campanhas/leads/resolver", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ telefones: linhas.map((linha) => linha.telefone) }),
+        signal: controller.signal,
+      });
+      const dados: unknown = await resposta.json().catch(() => null);
+      if (controller.signal.aborted) return;
+      if (!resposta.ok) {
+        const erroServidor = dados && typeof dados === "object" && "error" in dados &&
+          typeof dados.error === "string" ? dados.error : null;
+        throw new Error(erroServidor ?? "Não foi possível conferir os contatos no CRM.");
+      }
+      if (!resolucaoCsvValida(dados)) throw new Error("Resposta inválida ao conferir os contatos.");
+      const mescla = mesclarLeadsCsv(selecionados, dados.leads);
+      setSelecionados(mescla.selecionados);
+      setResultadoCsv({
+        arquivo: file.name,
+        contagem: dados,
+        adicionados: mescla.adicionados,
+        jaSelecionados: mescla.jaSelecionados,
+        semEspaco: mescla.semEspaco,
+      });
+    } catch (e) {
+      if (!controller.signal.aborted) {
+        setErroCsv(e instanceof Error ? e.message : "Não foi possível ler o CSV. Tente novamente.");
+      }
+    } finally {
+      if (!controller.signal.aborted) setResolvendoCsv(false);
+      if (csvInput.current) csvInput.current.value = "";
     }
   };
 
@@ -446,6 +731,8 @@ export function CampanhaNovaDialog({
         etapas: listaDeTexto(etapas),
         temperaturas: listaDeTexto(temperaturas),
         tags: listaDeTexto(tags),
+        origens: listaDeTexto(origens),
+        ...periodoCriacao,
         semCorretor,
       },
     };
@@ -562,6 +849,8 @@ export function CampanhaNovaDialog({
               value={modoPublico}
               onValueChange={(v) => {
                 if (v === "selecionados" || v === "segmento") {
+                  limparCsv();
+                  invalidarPublicoAnuncio();
                   setModoPublico(v);
                   setConfirmarSegmento(false);
                 }
@@ -581,6 +870,126 @@ export function CampanhaNovaDialog({
                   Busque e escolha os contatos do CRM. Os filtros avançados abaixo só restringem
                   essa seleção. Para um piloto, escolha apenas o contato autorizado.
                 </p>
+                <div className="space-y-2 rounded-md border p-3">
+                  <Label htmlFor="campanha-csv">Adicionar contatos de um CSV</Label>
+                  <Input
+                    ref={csvInput}
+                    id="campanha-csv"
+                    type="file"
+                    accept=".csv,text/csv"
+                    disabled={resolvendoCsv || puxandoAnuncio}
+                    aria-describedby="campanha-csv-ajuda"
+                    onChange={(event) => {
+                      const arquivo = event.target.files?.[0];
+                      if (arquivo) void resolverArquivoCsv(arquivo);
+                    }}
+                  />
+                  <p id="campanha-csv-ajuda" className="text-muted-foreground text-xs">
+                    Até 500 linhas, com colunas Nome e Telefone. O arquivo fica neste dispositivo;
+                    apenas os telefones são conferidos no CRM. Contatos ausentes ou ambíguos não entram na seleção.
+                  </p>
+                  {resolvendoCsv && <p role="status" className="text-sm">Conferindo telefones no CRM…</p>}
+                  {erroCsv && <p role="alert" className="text-destructive text-sm">{erroCsv}</p>}
+                  {resultadoCsv && (
+                    <div role="status" className="space-y-1 text-sm" aria-live="polite">
+                      <p className="font-medium break-words">{resultadoCsv.arquivo}: {resultadoCsv.adicionados} adicionados à seleção.</p>
+                      <p>
+                        {resultadoCsv.contagem.encontrados} encontrados no CRM; {resultadoCsv.contagem.ausentes} ausentes;
+                        {' '}{resultadoCsv.contagem.ambiguos} ambíguos; {resultadoCsv.contagem.duplicados} duplicados;
+                        {' '}{resultadoCsv.contagem.invalidos} inválidos.
+                      </p>
+                      {(resultadoCsv.jaSelecionados > 0 || resultadoCsv.semEspaco > 0) && (
+                        <p>{resultadoCsv.jaSelecionados} já selecionados; {resultadoCsv.semEspaco} fora da seleção pelo limite de 500.</p>
+                      )}
+                    </div>
+                  )}
+                  <p className="text-muted-foreground text-xs">
+                    Para cadastrar contatos ausentes, acesse{' '}
+                    <Link href="/whatsapp-oficial/contatos/importar" className="text-primary underline underline-offset-2">
+                      importar contatos
+                    </Link>. Importar não registra consentimento nem autoriza envio.
+                  </p>
+                </div>
+                <div className="space-y-3 rounded-md border p-3">
+                  <Label htmlFor="campanha-busca-anuncio">Anúncio Meta (nome cadastrado no CRM)</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="campanha-busca-anuncio"
+                      value={buscaAnuncio}
+                      maxLength={80}
+                      placeholder="Digite ao menos 2 caracteres do nome"
+                      onChange={(e) => {
+                        anunciosAbort.current?.abort();
+                        invalidarPublicoAnuncio();
+                        setBuscandoAnuncios(false);
+                        setBuscaAnuncio(e.target.value);
+                        setAnuncios([]);
+                        setAnuncioEscolhido("");
+                        setBuscaAnunciosFeita(false);
+                        setAnunciosTruncados(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && buscaAnuncio.trim().length >= 2) {
+                          e.preventDefault();
+                          void buscarAnuncios();
+                        }
+                      }}
+                    />
+                    <Button
+                      variant="outline"
+                      disabled={buscandoAnuncios || buscaAnuncio.trim().length < 2}
+                      onClick={() => void buscarAnuncios()}
+                    >
+                      {buscandoAnuncios ? "Buscando…" : "Buscar anúncios"}
+                    </Button>
+                  </div>
+                  {buscaAnunciosFeita && anuncios.length === 0 && (
+                    <p role="status" className="text-muted-foreground text-sm">Nenhum anúncio encontrado com esse nome.</p>
+                  )}
+                  {anuncios.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-muted-foreground text-xs">Escolha o nome exato do anúncio:</p>
+                      <ul className="max-h-40 space-y-1 overflow-y-auto">
+                        {anuncios.map((anuncio) => (
+                          <li key={anuncio}>
+                            <Button
+                              type="button"
+                              variant={anuncioEscolhido === anuncio ? "secondary" : "outline"}
+                              className="h-auto w-full justify-start text-left whitespace-normal"
+                              aria-pressed={anuncioEscolhido === anuncio}
+                              onClick={() => {
+                                invalidarPublicoAnuncio();
+                                setAnuncioEscolhido(anuncio);
+                              }}
+                            >
+                              {anuncio}
+                            </Button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {anunciosTruncados && (
+                    <p className="text-muted-foreground text-xs">Há mais anúncios. Refine o nome para encontrar o desejado.</p>
+                  )}
+                  <p className="text-muted-foreground text-xs">
+                    Usa o período de criação abaixo. Sem datas, considera todos os leads desse anúncio. Puxar contatos apenas adiciona à seleção, que permanece ao mudar o anúncio ou as datas. Consentimento e elegibilidade são conferidos depois, na simulação.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={!anuncioEscolhido || Boolean(erroPeriodo) || puxandoAnuncio || resolvendoCsv}
+                    onClick={() => void puxarContatosAnuncio()}
+                  >
+                    {puxandoAnuncio ? "Puxando…" : "Puxar contatos"}
+                  </Button>
+                  {erroAnuncio && <p role="alert" className="text-destructive text-sm">{erroAnuncio}</p>}
+                  {resultadoAnuncio && (
+                    <p role="status" className="text-sm" aria-live="polite">
+                      {resultadoAnuncio.total} contatos encontrados para “{resultadoAnuncio.anuncio}”; {resultadoAnuncio.adicionados} adicionados; {resultadoAnuncio.jaSelecionados} já selecionados; {resultadoAnuncio.semEspaco} fora da seleção pelo limite de 500.
+                    </p>
+                  )}
+                </div>
                 <Label htmlFor="campanha-busca">Nome ou telefone</Label>
                 <div className="flex gap-2">
                   <Input
@@ -630,7 +1039,7 @@ export function CampanhaNovaDialog({
                           <Checkbox
                             id={`lead-${lead.id}`}
                             checked={marcado}
-                            disabled={!marcado && selecionados.length >= 500}
+                            disabled={resolvendoCsv || puxandoAnuncio || (!marcado && selecionados.length >= 500)}
                             onCheckedChange={(checked) =>
                               setSelecionados((prev) =>
                                 checked
@@ -669,6 +1078,7 @@ export function CampanhaNovaDialog({
                         key={lead.id}
                         size="sm"
                         variant="secondary"
+                        disabled={resolvendoCsv || puxandoAnuncio}
                         className="max-w-full text-left whitespace-normal"
                         aria-label={`Remover ${lead.nome} da seleção`}
                         onClick={() =>
@@ -746,6 +1156,57 @@ export function CampanhaNovaDialog({
                 placeholder="bolsao"
               />
             </div>
+            <CampoTexto
+              id="seg-origens"
+              label="Origem dos leads"
+              value={origens}
+              onChange={(v) => {
+                setOrigens(v);
+                setConfirmarSegmento(false);
+              }}
+              placeholder="Valores cadastrados no CRM"
+            />
+            <p className="text-muted-foreground text-xs">
+              Informe os valores exatos de origem do CRM, separados por vírgula.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="seg-criado-de" className="text-xs">Criado a partir de</Label>
+                <Input
+                  id="seg-criado-de"
+                  type="date"
+                  value={criadoDe}
+                  max={criadoAte || undefined}
+                  aria-invalid={Boolean(erroPeriodo)}
+                  aria-describedby="seg-periodo-ajuda"
+                  onChange={(e) => {
+                    invalidarPublicoAnuncio();
+                    setCriadoDe(e.target.value);
+                    setConfirmarSegmento(false);
+                  }}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="seg-criado-ate" className="text-xs">Criado até</Label>
+                <Input
+                  id="seg-criado-ate"
+                  type="date"
+                  value={criadoAte}
+                  min={criadoDe || undefined}
+                  aria-invalid={Boolean(erroPeriodo)}
+                  aria-describedby="seg-periodo-ajuda"
+                  onChange={(e) => {
+                    invalidarPublicoAnuncio();
+                    setCriadoAte(e.target.value);
+                    setConfirmarSegmento(false);
+                  }}
+                />
+              </div>
+            </div>
+            <p id="seg-periodo-ajuda" className="text-muted-foreground text-xs">
+              Datas no fuso {fuso}. O dia final inteiro entra no filtro. Deixe em branco para não limitar.
+            </p>
+            {erroPeriodo && <p role="alert" className="text-destructive text-xs">{erroPeriodo}</p>}
             <div className="flex items-center gap-2">
               <Checkbox
                 id="seg-sem-corretor"
@@ -1150,6 +1611,20 @@ export function CampanhaNovaDialog({
                       {modoPublico === 'selecionados'
                         ? `${selecionados.length} contatos escolhidos, sujeitos aos filtros e à elegibilidade`
                         : 'Segmento do CRM; quantidade a conferir na geração do público'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Filtros do CRM</dt>
+                    <dd className="break-words">
+                      {[
+                        listaDeTexto(etapas).length > 0 && `Etapas: ${listaDeTexto(etapas).join(', ')}`,
+                        listaDeTexto(temperaturas).length > 0 && `Temperaturas: ${listaDeTexto(temperaturas).join(', ')}`,
+                        listaDeTexto(tags).length > 0 && `Tags: ${listaDeTexto(tags).join(', ')}`,
+                        listaDeTexto(origens).length > 0 && `Origens: ${listaDeTexto(origens).join(', ')}`,
+                        criadoDe && `Criados desde ${criadoDe.split('-').reverse().join('/')}`,
+                        criadoAte && `Criados até ${criadoAte.split('-').reverse().join('/')} (dia inteiro)`,
+                        semCorretor && 'Somente sem corretor',
+                      ].filter(Boolean).join('; ') || 'Sem filtros adicionais'}
                     </dd>
                   </div>
                   <div>
