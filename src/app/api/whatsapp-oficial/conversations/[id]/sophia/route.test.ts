@@ -26,6 +26,12 @@ describe('human Sophia pause', () => {
   const rpc = vi.fn()
   const from = vi.fn()
 
+  function channel(provider: string, sophia_permitida: boolean) {
+    const row = { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { provider, sophia_permitida }, error: null }) }) }) }) }
+    const conversation = { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { sophia_ativa: false, sophia_alterada_em: null }, error: null }) }) }) }) }
+    from.mockImplementation((table: string) => table === 'whatsapp_channels' ? row : conversation)
+  }
+
   beforeEach(() => {
     rpc.mockReset()
     from.mockReset()
@@ -57,11 +63,43 @@ describe('human Sophia pause', () => {
   })
 
   it('does not show the toggle on a non-Meta channel', async () => {
-    const channel = { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { provider: 'evolution' }, error: null }) }) }) }) }
-    const conversation = { select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { sophia_ativa: false, sophia_alterada_em: null }, error: null }) }) }) }) }
-    from.mockImplementation((table: string) => table === 'whatsapp_channels' ? channel : conversation)
+    channel('evolution', false)
     const response = await GET(new Request('http://localhost'), params)
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ supported: false, sophia_ativa: false })
+  })
+
+  it('shows broker Meta channels as human-only and rejects activation before the RPC', async () => {
+    channel('meta_cloud', false)
+    const state = await GET(new Request('http://localhost'), params)
+    expect(state.status).toBe(200)
+    expect(await state.json()).toMatchObject({
+      supported: false,
+      sophia_ativa: false,
+      reason: expect.stringContaining('atendimento permanece humano'),
+    })
+    const response = await PATCH(patch(true), params)
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('atendimento permanece humano') })
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it('preserves the official channel and allows pausing even after channel permission is removed', async () => {
+    channel('meta_cloud', true)
+    const state = await GET(new Request('http://localhost'), params)
+    expect(await state.json()).toMatchObject({ supported: true, reason: null })
+    channel('meta_cloud', false)
+    rpc.mockResolvedValue({ data: { ok: true, sophia_ativa: false, cancelled_replies: 0, in_flight_replies: 0 }, error: null })
+    const response = await PATCH(patch(false), params)
+    expect(response.status).toBe(200)
+    expect(rpc).toHaveBeenCalledOnce()
+  })
+
+  it('translates the database race guard into a legible conflict', async () => {
+    channel('meta_cloud', true)
+    rpc.mockResolvedValue({ data: null, error: { code: '23514', message: 'sophia_nao_permitida_no_canal' } })
+    const response = await PATCH(patch(true), params)
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('neste número') })
   })
 })

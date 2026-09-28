@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 interface SophiaState {
   supported: boolean
   sophia_ativa: boolean
+  reason?: string | null
 }
 
 /** Human takeover for an official Meta conversation; all authority stays in the RPC. */
@@ -47,13 +48,16 @@ export function SophiaToggle({
     return () => controller.abort()
   }, [conversationId, refreshKey])
 
-  if (!state?.supported) return null
+  if (!state) return null
+  if (!state.supported && !state.sophia_ativa) {
+    return <span role="status" className="text-muted-foreground text-xs">{state.reason ?? 'Sophia indisponível neste canal.'}</span>
+  }
 
   const toggle = async () => {
     if (saving) return
     setSaving(true)
     try {
-      const next = !state.sophia_ativa
+      const next = state.supported && !state.sophia_ativa
       const response = await fetch(`/api/whatsapp-oficial/conversations/${conversationId}/sophia`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -68,7 +72,7 @@ export function SophiaToggle({
       if (!response.ok || result.sophia_ativa !== next) {
         throw new Error(result.error ?? 'Não foi possível alterar a Sophia.')
       }
-      setState({ supported: true, sophia_ativa: next })
+      setState({ ...state, sophia_ativa: next })
       toast.success(next ? 'Sophia ativada nesta conversa.' : 'Sophia pausada; atendimento humano ativo.')
       if (!next) onPaused?.(result.in_flight_replies ?? 0)
       onConversationChanged()
@@ -80,17 +84,20 @@ export function SophiaToggle({
   }
 
   return (
-    <Button
-      variant={state.sophia_ativa ? 'outline' : 'secondary'}
-      size="sm"
-      aria-label={state.sophia_ativa ? 'Pausar Sophia nesta conversa' : 'Ativar Sophia nesta conversa'}
-      aria-pressed={state.sophia_ativa}
-      disabled={saving}
-      onClick={() => void toggle()}
-    >
-      {saving ? <Loader2 data-icon="inline-start" className="animate-spin" /> :
-        state.sophia_ativa ? <PauseCircle data-icon="inline-start" /> : <PlayCircle data-icon="inline-start" />}
-      {state.sophia_ativa ? 'Pausar Sophia' : 'Ativar Sophia'}
-    </Button>
+    <div className="flex flex-wrap items-center gap-2">
+      {!state.supported && <span role="status" className="text-muted-foreground text-xs">{state.reason ?? 'Sophia indisponível neste canal.'}</span>}
+      <Button
+        variant={state.sophia_ativa ? 'outline' : 'secondary'}
+        size="sm"
+        aria-label={state.sophia_ativa ? 'Pausar Sophia nesta conversa' : 'Ativar Sophia nesta conversa'}
+        aria-pressed={state.sophia_ativa}
+        disabled={saving}
+        onClick={() => void toggle()}
+      >
+        {saving ? <Loader2 data-icon="inline-start" className="animate-spin" /> :
+          state.sophia_ativa ? <PauseCircle data-icon="inline-start" /> : <PlayCircle data-icon="inline-start" />}
+        {state.sophia_ativa ? 'Pausar Sophia' : 'Ativar Sophia'}
+      </Button>
+    </div>
   )
 }
