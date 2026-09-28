@@ -50,13 +50,12 @@ describe('PATCH /api/whatsapp-oficial/conversations/[id]/status', () => {
   })
 
   it('updates status for an authorized caller', async () => {
-    const eq = vi.fn().mockResolvedValue({ error: null })
-    const update = vi.fn(() => ({ eq }))
-    const admin = { from: vi.fn(() => ({ update })) }
+    const rpc = vi.fn().mockResolvedValue({ data: { ok: true, status: 'encerrada' }, error: null })
+    const admin = { from: vi.fn() }
     mocks.requireConversationAccess.mockResolvedValue({
       userId: 'owner-corretor',
       conversation: { id: 'conv-1', tenant_id: 'sunt', canal_id: 'canal-1', lead_id: 'lead-1', status: 'aberta' },
-      supabaseUser: {},
+      supabaseUser: { rpc },
       admin,
     })
 
@@ -65,6 +64,23 @@ describe('PATCH /api/whatsapp-oficial/conversations/[id]/status', () => {
 
     expect(res.status).toBe(200)
     expect(json.status).toBe('encerrada')
-    expect(update).toHaveBeenCalledWith({ status: 'encerrada' })
+    expect(rpc).toHaveBeenCalledWith('whatsapp_oficial_atualizar_conversa', {
+      p_conversation_id: 'conv-1', p_operation: 'status', p_status: 'encerrada',
+    })
+    expect(admin.from).not.toHaveBeenCalled()
+  })
+
+  it('does not report success when the database revokes access before the write', async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: { code: '42501', message: 'sem_permissao_conversa' } })
+    mocks.requireConversationAccess.mockResolvedValue({
+      userId: 'owner-corretor',
+      conversation: { id: 'conv-1' },
+      supabaseUser: { rpc },
+      admin: { from: vi.fn() },
+    })
+
+    const res = await PATCH(jsonRequest({ status: 'encerrada' }), params)
+
+    expect(res.status).toBe(403)
   })
 })

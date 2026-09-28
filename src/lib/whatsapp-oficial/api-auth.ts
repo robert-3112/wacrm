@@ -14,11 +14,10 @@
  *      the lead and channel belong to that active broker in the same tenant.
  *      A `maybeSingle()` miss means "doesn't exist OR you can't see it" —
  *      same 404 either way, with no information leak.
- *   2. Once authorized, the route uses the service-role client
- *      (`supabaseAdmin()`) to perform the actual write — these tables have
- *      no INSERT/UPDATE/DELETE policy at all yet (ADR D5/D10), so a
- *      service-role client is the only way to write regardless of who's
- *      calling.
+ *   2. Writes with existing database RPCs use the authenticated client,
+ *      so the database revalidates authorization atomically. Other routes
+ *      still use the service-role client (`supabaseAdmin()`) for writes
+ *      protected by their own RPC or trigger.
  */
 
 import { NextResponse } from 'next/server'
@@ -133,9 +132,9 @@ export interface ConversationAccessContext {
   /** RLS-scoped client (the caller's own session) — safe for further reads
    *  that should stay authorization-scoped. */
   supabaseUser: SupabaseClient
-  /** service_role client — bypasses RLS. Use only for the specific write
-   *  this route exists to perform, never to read data the authorization
-   *  check above didn't already clear. */
+  /** service_role client — bypasses RLS. Routes that need it must rely on a
+   *  database RPC or trigger that rechecks actor, lead and channel at write
+   *  time; a preceding SELECT alone is not authorization. */
   admin: SupabaseClient
 }
 

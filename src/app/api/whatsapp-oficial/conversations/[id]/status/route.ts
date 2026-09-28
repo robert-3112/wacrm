@@ -11,15 +11,7 @@ import {
 } from '@/lib/whatsapp-oficial/rate-limit'
 import type { WhatsAppConversationStatus } from '@/types/whatsapp-oficial'
 
-/**
- * Encerrar/reabrir uma conversa (Fase 6, mission item 6). Plain UPDATE via
- * the service-role client — the mission brief explicitly says this doesn't
- * need a new RPC ("pode ser um UPDATE direto com o client admin"), unlike
- * handoff/opt-out which are RPC-gated because they also touch `public.leads`.
- * `whatsapp_conversations.status` is a triage field ownedentirely by the
- * Hub (harvest matrix area 7: "distinto do funil comercial de leads.status/
- * etapa" — the two never sync automatically).
- */
+/** Encerrar/reabrir a triagem do Hub com autorização revalidada no banco. */
 
 const VALID_STATUSES: WhatsAppConversationStatus[] = ['aberta', 'pendente', 'encerrada']
 
@@ -40,7 +32,7 @@ export async function PATCH(
       throw new BadRequestError(`status must be one of: ${VALID_STATUSES.join(', ')}`)
     }
 
-    const { userId, conversation, admin } = await requireConversationAccess(id)
+    const { userId, conversation, supabaseUser } = await requireConversationAccess(id)
 
     const rl = checkRateLimit(
       `whatsapp-oficial-conversation-status:${userId}`,
@@ -48,15 +40,15 @@ export async function PATCH(
     )
     if (!rl.success) return rateLimitResponse(rl)
 
-    const { error } = await admin
-      .from('whatsapp_conversations')
-      .update({ status })
-      .eq('id', conversation.id)
-
-    if (error) {
-      console.error('[whatsapp-oficial/conversations/status] failed to update:', error.message)
-      return NextResponse.json({ error: 'Failed to update status' }, { status: 500 })
-    }
+    // A RPC usa auth.uid(), bloqueia as linhas de autorização e atualiza na
+    // mesma transação. O SELECT anterior é somente UX; não autoriza o write.
+    const { data, error } = await supabaseUser.rpc('whatsapp_oficial_atualizar_conversa', {
+      p_conversation_id: conversation.id,
+      p_operation: 'status',
+      p_status: status,
+    })
+    if (error) throw error
+    if (data?.ok !== true || data.status !== status) throw new Error('Conversation status update failed')
 
     return NextResponse.json({ ok: true, status })
   } catch (error) {
