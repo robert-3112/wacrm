@@ -27,6 +27,7 @@ import { ExternalLink, Loader2, Send } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -73,12 +74,14 @@ function crmLeadUrl(leadId: string): string | null {
 interface LeadSidebarProps {
   conversation: WhatsAppConversation | null;
   currentUserId: string | null;
+  mobileOpen: boolean;
+  onMobileOpenChange: (open: boolean) => void;
 }
 
-export function LeadSidebar({ conversation, currentUserId }: LeadSidebarProps) {
+export function LeadSidebar({ conversation, currentUserId, mobileOpen, onMobileOpenChange }: LeadSidebarProps) {
   if (!conversation) {
     return (
-      <div className="hidden h-full w-72 shrink-0 items-center justify-center border-l border-border bg-card p-4 text-center lg:flex">
+      <div className="hidden h-full w-72 shrink-0 items-center justify-center border-l border-border bg-card p-4 text-center xl:flex">
         <p className="text-sm text-muted-foreground">
           Selecione uma conversa para ver os detalhes do lead.
         </p>
@@ -87,8 +90,29 @@ export function LeadSidebar({ conversation, currentUserId }: LeadSidebarProps) {
   }
 
   return (
-    <div className="hidden h-full w-72 shrink-0 flex-col border-l border-border bg-card lg:flex">
-      <Tabs defaultValue="detalhes" className="flex h-full flex-col gap-0">
+    <>
+      <div className="hidden h-full w-72 shrink-0 flex-col border-l border-border bg-card xl:flex">
+        <LeadSidebarContent conversation={conversation} currentUserId={currentUserId} />
+      </div>
+      <Sheet open={mobileOpen} onOpenChange={onMobileOpenChange}>
+        <SheetContent side="right" className="data-[side=right]:w-full data-[side=right]:max-w-md gap-0 overflow-hidden p-0 xl:hidden">
+          <SheetHeader className="border-b border-border pr-12">
+            <SheetTitle>Detalhes e notas</SheetTitle>
+            <SheetDescription>Informações da conversa e anotações da equipe.</SheetDescription>
+          </SheetHeader>
+          <LeadSidebarContent conversation={conversation} currentUserId={currentUserId} />
+        </SheetContent>
+      </Sheet>
+    </>
+  );
+}
+
+function LeadSidebarContent({ conversation, currentUserId }: {
+  conversation: WhatsAppConversation;
+  currentUserId: string | null;
+}) {
+  return (
+      <Tabs defaultValue="detalhes" className="flex min-h-0 flex-1 flex-col gap-0">
         <div className="border-b border-border p-2">
           <TabsList className="w-full">
             <TabsTrigger value="detalhes" className="flex-1">
@@ -105,10 +129,9 @@ export function LeadSidebar({ conversation, currentUserId }: LeadSidebarProps) {
         </TabsContent>
 
         <TabsContent value="notas" className="flex min-h-0 flex-1 flex-col">
-          <InternalNotesPanel conversationId={conversation.id} currentUserId={currentUserId} />
+          <InternalNotesPanel key={conversation.id} conversationId={conversation.id} currentUserId={currentUserId} />
         </TabsContent>
       </Tabs>
-    </div>
   );
 }
 
