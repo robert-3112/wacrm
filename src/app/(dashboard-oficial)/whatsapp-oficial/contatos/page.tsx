@@ -15,6 +15,8 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { createClient } from '@/lib/supabase/server';
+import { fetchCanaisGestao } from '@/lib/whatsapp-oficial/gestao-server';
+import { IniciarConversa } from '@/components/whatsapp-oficial/iniciar-conversa';
 import {
   CONTACT_PAGE_SIZE,
   fetchHubContacts,
@@ -60,6 +62,11 @@ export default async function ContatosPage({
   const query = parseContactListQuery(await searchParams);
   const supabase = await createClient();
   const { data: podeImportar } = await supabase.rpc('crm_is_admin_owner');
+  const pilotId = process.env.WHATSAPP_PILOT_CHANNEL_ID;
+  const { canais } = pilotId ? await fetchCanaisGestao(supabase) : { canais: [] };
+  const canalPiloto = canais.find(
+    (canal) => canal.id === pilotId && canal.provider === 'meta_cloud' && canal.status === 'ativo'
+  ) ?? null;
   const result = query.buscaInvalida
     ? { contatos: [], total: 0, erro: null }
     : await fetchHubContacts(supabase, query);
@@ -248,7 +255,12 @@ export default async function ContatosPage({
                         </span>
                       )}
                     </div>
-                    <div className="sm:text-right">
+                    <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                      {canalPiloto && contato.whatsapp && (
+                        <IniciarConversa contato={{
+                          id: contato.id, nome: contato.nome, whatsapp: contato.whatsapp,
+                        }} canal={canalPiloto} />
+                      )}
                       {crmUrl ? (
                         <a
                           href={crmUrl}
