@@ -37,20 +37,35 @@ describe('POST /api/whatsapp-oficial/conversations/[id]/read', () => {
   })
 
   it('zeroes nao_lidas_corretor for an authorized caller', async () => {
-    const eq = vi.fn().mockResolvedValue({ error: null })
-    const update = vi.fn(() => ({ eq }))
-    const admin = { from: vi.fn(() => ({ update })) }
+    const rpc = vi.fn().mockResolvedValue({ data: { ok: true }, error: null })
+    const admin = { from: vi.fn() }
     mocks.requireConversationAccess.mockResolvedValue({
       userId: 'owner-corretor',
       conversation: { id: 'conv-1', tenant_id: 'sunt', canal_id: 'canal-1', lead_id: 'lead-1', status: 'aberta' },
-      supabaseUser: {},
+      supabaseUser: { rpc },
       admin,
     })
 
     const res = await POST(new Request('http://localhost'), params)
 
     expect(res.status).toBe(200)
-    expect(update).toHaveBeenCalledWith({ nao_lidas_corretor: 0 })
-    expect(eq).toHaveBeenCalledWith('id', 'conv-1')
+    expect(rpc).toHaveBeenCalledWith('whatsapp_oficial_atualizar_conversa', {
+      p_conversation_id: 'conv-1', p_operation: 'read', p_status: null,
+    })
+    expect(admin.from).not.toHaveBeenCalled()
+  })
+
+  it('does not report success after broker assignment changes', async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: { code: '42501', message: 'sem_permissao_conversa' } })
+    mocks.requireConversationAccess.mockResolvedValue({
+      userId: 'owner-corretor',
+      conversation: { id: 'conv-1' },
+      supabaseUser: { rpc },
+      admin: { from: vi.fn() },
+    })
+
+    const res = await POST(new Request('http://localhost'), params)
+
+    expect(res.status).toBe(403)
   })
 })
