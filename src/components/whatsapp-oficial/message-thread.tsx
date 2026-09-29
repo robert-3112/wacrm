@@ -34,6 +34,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { leadDisplayName } from "@/lib/whatsapp-oficial/inbox-data";
+import type { InboxItem } from "@/lib/whatsapp-oficial/inbox-data";
 import { registerHandoff, registerOptout, sophiaInFlightNotice, updateConversationStatus } from "@/lib/whatsapp-oficial/inbox-actions";
 import { MessageBubble } from "./message-bubble";
 import { MessageComposer } from "./message-composer";
@@ -54,7 +55,9 @@ const STATUS_LABEL: Record<WhatsAppConversationStatus, string> = {
 
 interface MessageThreadProps {
   conversation: WhatsAppConversation | null;
+  linkedPair?: Extract<InboxItem, { kind: "pair" }> | null;
   messages: WhatsAppMessage[];
+  messagesError?: string | null;
   loading: boolean;
   onMessageSent: (message: WhatsAppMessage) => void;
   /** Fired after handoff/optout/status actions so the parent can re-pull
@@ -71,7 +74,9 @@ interface MessageThreadProps {
 
 export function MessageThread({
   conversation,
+  linkedPair,
   messages,
+  messagesError,
   loading,
   onMessageSent,
   onConversationChanged,
@@ -86,13 +91,17 @@ export function MessageThread({
   const [sophiaRefresh, setSophiaRefresh] = useState(0);
   const [templateConversationId, setTemplateConversationId] = useState<string | null>(null);
   const latestInboundId = messages.filter((message) => message.direction === "inbound").at(-1)?.id;
-  const sendWindow = useConversationWindow(conversation?.id, latestInboundId);
+  const sendWindow = useConversationWindow(linkedPair ? undefined : conversation?.id, latestInboundId);
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, conversation?.id]);
+  }, [messages, conversation?.id, linkedPair?.id]);
+
+  if (linkedPair) {
+    return <LinkedReadOnlyThread item={linkedPair} messages={messages} error={messagesError} loading={loading} onBack={onBack} scrollRef={scrollRef} />;
+  }
 
   if (!conversation) {
     return (
@@ -211,6 +220,44 @@ export function MessageThread({
       />
     </div>
   );
+}
+
+/** A link is evidence of matching phone aliases, not permission to send or consent. */
+function LinkedReadOnlyThread({
+  item, messages, error, loading, onBack, scrollRef,
+}: {
+  item: Extract<InboxItem, { kind: "pair" }>;
+  messages: WhatsAppMessage[];
+  error?: string | null;
+  loading: boolean;
+  onBack?: () => void;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const name = leadDisplayName(item.conversation);
+  const optedOut = Boolean(item.outbound.optout_em || item.inbound.optout_em);
+  return <div className="flex h-full min-w-0 flex-1 flex-col bg-background">
+    <div className="flex items-center gap-3 border-b border-border px-4 py-3">
+      {onBack && <Button variant="ghost" size="icon-sm" className="xl:hidden" onClick={onBack} aria-label="Voltar para a lista de conversas"><ArrowLeft className="h-4 w-4" /></Button>}
+      <div className="min-w-0">
+        <div className="flex items-center gap-2"><span className="truncate text-sm font-semibold">{name}</span><Badge variant="secondary">Visão vinculada</Badge></div>
+        <p className="text-xs text-muted-foreground">Histórico de envio e resposta em dois cadastros de telefone</p>
+      </div>
+    </div>
+    <div role="status" className="border-b border-border bg-muted/50 px-4 py-3 text-xs text-muted-foreground">
+      {optedOut && <p className="mb-1 font-medium text-destructive">Há opt-out em um dos cadastros. Envio bloqueado nesta visão.</p>}
+      Consulta apenas. A vinculação não confirma consentimento nem libera envio, template, alteração de status ou janela de atendimento.
+    </div>
+    <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+      {loading ? <div className="flex justify-center py-12"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+        : error ? <p role="alert" className="py-12 text-center text-sm text-destructive">Histórico vinculado indisponível. Atualize a página para verificar novamente.</p>
+        : messages.length === 0 ? <p className="py-12 text-center text-sm text-muted-foreground">Nenhuma mensagem visível.</p>
+          : messages.map(message => <div key={message.id}>
+            <p className="mb-1 text-[10px] text-muted-foreground">{message.conversation_id === item.outbound.id ? "Cadastro do envio" : "Cadastro da resposta"}</p>
+            <MessageBubble message={message} />
+          </div>)}
+    </div>
+    <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground">Respostas pela visão vinculada serão liberadas após validação dos dois cadastros.</p>
+  </div>;
 }
 
 function ThreadHeader({
