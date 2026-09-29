@@ -24,6 +24,9 @@ describe('destinoSeguro', () => {
     ['http://site-falso.test/', 'URL absoluta sem TLS'],
     ['//site-falso.test/', 'protocol-relative — o navegador SAI do domínio'],
     ['/\\site-falso.test/', 'barra invertida, que alguns navegadores tratam como //'],
+    ['/\t/site-falso.test/', 'tab removido pelo parser de URL'],
+    ['/\n/site-falso.test/', 'newline removido pelo parser de URL'],
+    ['/\r\\site-falso.test/', 'carriage return antes de barra invertida'],
     ['javascript:alert(1)', 'esquema javascript'],
     ['dashboard', 'relativo sem barra inicial'],
   ])('recusa %s (%s)', (entrada) => {

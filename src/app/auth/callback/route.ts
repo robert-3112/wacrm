@@ -26,6 +26,9 @@ import { ROTA_INICIAL } from '@/lib/rotas'
  */
 export function destinoSeguro(next: string | null): string {
   if (!next || !next.startsWith('/')) return ROTA_INICIAL
+  // WHATWG URL removes these characters before parsing, turning /\t/host
+  // into //host and bypassing the protocol-relative check below.
+  if (/[\t\r\n]/.test(next)) return ROTA_INICIAL
   if (next.startsWith('//') || next.startsWith('/\\')) return ROTA_INICIAL
   return next
 }
