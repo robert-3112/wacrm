@@ -34,6 +34,7 @@ import { markConversationRead } from "@/lib/whatsapp-oficial/inbox-actions";
 import { useWhatsAppOficialRealtime } from "@/hooks/use-whatsapp-oficial-realtime";
 import { ConversationList } from "./conversation-list";
 import { MessageThread } from "./message-thread";
+import { PairCandidateAction } from "./pair-candidate-action";
 import { LeadSidebar } from "./lead-sidebar";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -50,6 +51,7 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [canManage, setCanManage] = useState(false);
   const [channelNames, setChannelNames] = useState<Record<string, string>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
 
@@ -144,7 +146,12 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!cancelled) setCurrentUserId(user?.id ?? null);
+      if (cancelled) return;
+      setCurrentUserId(user?.id ?? null);
+      if (user) {
+        const { data, error } = await supabase.rpc('crm_is_gestao');
+        if (!cancelled) setCanManage(!error && data === true);
+      }
     })();
     return () => {
       cancelled = true;
@@ -324,6 +331,10 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
             </Button>
           </div>
         )}
+        {activeConversation && canManage && <div className="flex shrink-0 justify-end border-b border-border bg-card px-3 py-2">
+          <PairCandidateAction key={activeConversation.id} conversationId={activeConversation.id}
+            onLinked={() => { setInboxStatus('loading'); window.location.reload(); }} />
+        </div>}
         <div className="min-h-0 flex-1">
           <MessageThread
             envioReal={envioReal}
