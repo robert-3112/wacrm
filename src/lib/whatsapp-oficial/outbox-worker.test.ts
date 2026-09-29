@@ -456,6 +456,21 @@ describe('processOutboxBatch — verified paired human reply', () => {
     expect(adapterMock.send).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['shadow', true, 'modo_shadow'],
+    ['live', false, 'provider_send_desabilitado'],
+  ] as const)('preserves a paired reply in mode=%s with provider send=%s', async (mode, sendEnabled, reason) => {
+    vi.mocked(isSendEnabledFor).mockReturnValue(sendEnabled)
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [pairedJob()] } })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode }), workerId: 'w1' })
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason })
+    expect(result.simulated).toBe(0)
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente', claimed_by: null })
+    expect(messageUpdates(calls)).toHaveLength(0)
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
   it('requeues a claimed reply if the database gate closes after claim', async () => {
     const { admin, calls } = makeAdmin({
       claimResult: { ok: true, claimed: [pairedJob()] },

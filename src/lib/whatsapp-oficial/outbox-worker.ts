@@ -589,6 +589,19 @@ async function handleJob(
     return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'canal_pausado' }, bucket: 'blocked' }
   }
 
+  // A paired reply has a real pending message. Never consume its outbox as
+  // "simulado" while any send switch is off; a later live claim must recheck
+  // the bilateral database policy before it can reach the provider.
+  if (job.paired_reply_pair_id &&
+      (process.env.WHATSAPP_PAIR_REPLY_ENABLED !== 'true' ||
+       flags.mode !== 'live' || !isSendEnabledFor(job.provider, flags))) {
+    const reason = process.env.WHATSAPP_PAIR_REPLY_ENABLED !== 'true' ? 'resposta_par_desabilitada'
+      : flags.mode !== 'live' ? 'modo_shadow' : 'provider_send_desabilitado'
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' }
+  }
+
   // d) shadow — no provider call, no credential read, whatsapp_messages untouched.
   //
   // Checked BEFORE the pilot allowlist on purpose. The allowlist exists to
