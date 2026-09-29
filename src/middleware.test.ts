@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { unstable_doesMiddlewareMatch } from "next/experimental/testing/server";
 import { ROTA_INICIAL, ROTAS_MORTAS } from "@/lib/rotas";
 
 // --- Scenario knobs the mock reads -----------------------------------------
@@ -37,7 +38,25 @@ vi.mock("@supabase/ssr", () => ({
 }));
 
 // Imported after the mock is registered.
-const { middleware } = await import("./middleware");
+const { middleware, config } = await import("./middleware");
+
+describe("middleware — matching dynamic routes with image suffixes", () => {
+  it.each([
+    "/api/whatsapp/media/file.png",
+    "/api/flows/flow.svg",
+    "/api/account/members/member.jpg",
+    "/join/invite.webp",
+    "/whatsapp-oficial/inbox/conversation.gif",
+  ])("runs the route gate for %s", (url) => {
+    expect(unstable_doesMiddlewareMatch({ config, nextConfig: {}, url })).toBe(true);
+  });
+
+  it.each(["/_next/static/chunk.js", "/_next/image", "/favicon.ico", "/logo.png"])(
+    "still skips static assets: %s", (url) => {
+      expect(unstable_doesMiddlewareMatch({ config, nextConfig: {}, url })).toBe(false);
+    },
+  );
+});
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://test.supabase.co";
