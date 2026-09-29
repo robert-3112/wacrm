@@ -34,6 +34,7 @@ function makeJob(overrides: Partial<OutboxJob> = {}): OutboxJob {
     canal_id: 'canal-1',
     conversation_id: 'conv-1',
     message_id: 'msg-1',
+    paired_reply_pair_id: null,
     tipo: 'mensagem',
     payload: { content: 'ola', message_type: 'text' },
     attempts: 0,

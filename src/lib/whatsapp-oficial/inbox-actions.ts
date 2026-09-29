@@ -87,6 +87,15 @@ export function sendTextMessage(
   return request('/api/whatsapp-oficial/messages/send', 'POST', { conversationId, content })
 }
 
+/** Text-only human reply via the inbound member of a verified pair. */
+export function sendPairedReply(
+  pairId: string,
+  content: string,
+  clientRequestId: string,
+): Promise<ActionResult<{ ok: true; messageId: string; conversationId: string; replayed: boolean }>> {
+  return request(`/api/whatsapp-oficial/conversations/pairs/${pairId}/reply`, 'POST', { content, clientRequestId })
+}
+
 /** Fase 6 mission item 4 — internal note (never reaches the contact). */
 export function addInternalNote(
   conversationId: string,

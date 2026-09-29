@@ -37,6 +37,7 @@ import { leadDisplayName } from "@/lib/whatsapp-oficial/inbox-data";
 import type { InboxItem } from "@/lib/whatsapp-oficial/inbox-data";
 import { registerHandoff, registerOptout, sophiaInFlightNotice, updateConversationStatus } from "@/lib/whatsapp-oficial/inbox-actions";
 import { MessageBubble } from "./message-bubble";
+import { PairedTextComposer } from "./paired-text-composer";
 import { MessageComposer } from "./message-composer";
 import { SophiaToggle } from "./sophia-toggle";
 import { useConversationWindow } from "./use-conversation-window";
@@ -60,6 +61,7 @@ interface MessageThreadProps {
   messagesError?: string | null;
   loading: boolean;
   onMessageSent: (message: WhatsAppMessage) => void;
+  onPairReplyQueued?: () => void;
   /** Fired after handoff/optout/status actions so the parent can re-pull
    *  the conversation (its `lead` join in particular) — those RPCs touch
    *  `public.leads`, which realtime here doesn't watch directly. */
@@ -79,6 +81,7 @@ export function MessageThread({
   messagesError,
   loading,
   onMessageSent,
+  onPairReplyQueued,
   onConversationChanged,
   onBack,
   envioReal,
@@ -100,7 +103,8 @@ export function MessageThread({
   }, [messages, conversation?.id, linkedPair?.id]);
 
   if (linkedPair) {
-    return <LinkedReadOnlyThread item={linkedPair} messages={messages} error={messagesError} loading={loading} onBack={onBack} scrollRef={scrollRef} />;
+    return <LinkedPairThread item={linkedPair} messages={messages} error={messagesError} loading={loading}
+      onBack={onBack} scrollRef={scrollRef} envioReal={envioReal} onQueued={onPairReplyQueued} />;
   }
 
   if (!conversation) {
@@ -222,9 +226,9 @@ export function MessageThread({
   );
 }
 
-/** A link is evidence of matching phone aliases, not permission to send or consent. */
-function LinkedReadOnlyThread({
-  item, messages, error, loading, onBack, scrollRef,
+/** A link is evidence of matching phone aliases, never consent by itself. */
+function LinkedPairThread({
+  item, messages, error, loading, onBack, scrollRef, envioReal, onQueued,
 }: {
   item: Extract<InboxItem, { kind: "pair" }>;
   messages: WhatsAppMessage[];
@@ -232,9 +236,44 @@ function LinkedReadOnlyThread({
   loading: boolean;
   onBack?: () => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
+  envioReal: boolean;
+  onQueued?: () => void;
 }) {
   const name = leadDisplayName(item.conversation);
   const optedOut = Boolean(item.outbound.optout_em || item.inbound.optout_em);
+  const [availability, setAvailability] = useState<{ pairId: string; enabled: boolean; window: { applies: boolean; open: boolean; expiresAt: string | null } } | null>(null);
+  const [availabilityError, setAvailabilityError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/whatsapp-oficial/conversations/pairs/${item.pair.id}/reply`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok || typeof data.enabled !== "boolean" ||
+            typeof data.window?.applies !== "boolean" || typeof data.window?.open !== "boolean") throw new Error("invalid_pair_window");
+        if (!cancelled) { setAvailability({ ...data, pairId: item.pair.id }); setAvailabilityError(false); }
+      } catch {
+        if (!cancelled) { setAvailability(null); setAvailabilityError(true); }
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [item.pair.id]);
+
+  const currentAvailability = availability?.pairId === item.pair.id ? availability : null;
+  const enabled = currentAvailability?.enabled === true;
+  const canReply = enabled && currentAvailability.window.applies && currentAvailability.window.open &&
+    !optedOut && item.outbound.status !== "encerrada" && item.inbound.status !== "encerrada" && !error && !loading;
+  const disabledReason = availabilityError ? "Não foi possível verificar a permissão de resposta."
+    : !currentAvailability ? "Verificando resposta vinculada…"
+      : !enabled ? "Resposta vinculada ainda desabilitada neste ambiente."
+        : optedOut ? "Um dos cadastros pediu para não receber mensagens."
+          : item.outbound.status === "encerrada" || item.inbound.status === "encerrada" ? "Um dos históricos está encerrado."
+            : !currentAvailability.window.applies || !currentAvailability.window.open ? "A janela de 24 horas da conversa recebida está fechada."
+              : error ? "Histórico indisponível; atualize antes de responder."
+                : loading ? "Carregando os dois históricos antes de responder…" : undefined;
   return <div className="flex h-full min-w-0 flex-1 flex-col bg-background">
     <div className="flex items-center gap-3 border-b border-border px-4 py-3">
       {onBack && <Button variant="ghost" size="icon-sm" className="xl:hidden" onClick={onBack} aria-label="Voltar para a lista de conversas"><ArrowLeft className="h-4 w-4" /></Button>}
@@ -245,7 +284,8 @@ function LinkedReadOnlyThread({
     </div>
     <div role="status" className="border-b border-border bg-muted/50 px-4 py-3 text-xs text-muted-foreground">
       {optedOut && <p className="mb-1 font-medium text-destructive">Há opt-out em um dos cadastros. Envio bloqueado nesta visão.</p>}
-      Consulta apenas. A vinculação não confirma consentimento nem libera envio, template, alteração de status ou janela de atendimento.
+      {enabled ? "Resposta humana de texto usa somente a conversa que recebeu a mensagem; o servidor confere ambos os cadastros antes do envio. Templates, mídia e ações de estado seguem bloqueados nesta visão."
+        : "Consulta apenas. A vinculação não confirma consentimento nem libera envio, template, alteração de status ou janela de atendimento."}
     </div>
     <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
       {loading ? <div className="flex justify-center py-12"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
@@ -256,7 +296,8 @@ function LinkedReadOnlyThread({
             <MessageBubble message={message} />
           </div>)}
     </div>
-    <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground">Respostas pela visão vinculada serão liberadas após validação dos dois cadastros.</p>
+    <PairedTextComposer key={item.pair.id} pairId={item.pair.id} disabled={!canReply} disabledReason={disabledReason}
+      envioReal={envioReal} onQueued={onQueued ?? (() => {})} />
   </div>;
 }
 

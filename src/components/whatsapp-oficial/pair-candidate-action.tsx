@@ -21,7 +21,7 @@ export function PairProofSummary({ candidate }: { candidate: PairCandidate }) {
       <p className="mt-2 text-xs text-muted-foreground">Envio confirmado em {when(candidate.status_at)} · resposta recebida em {when(candidate.inbound_at)}</p>
     </div>
     <div role="alert" className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-amber-950 dark:text-amber-200">
-      <strong>Somente leitura após vincular.</strong> Os dois históricos aparecerão juntos, mas todo envio a esse contato ficará bloqueado temporariamente até que a segurança de consentimento dos dois lados seja concluída. Esta operação é auditada e não pode ser desfeita pelo painel.
+      <strong>Vínculo auditado.</strong> Os dois históricos aparecerão juntos. A resposta humana de texto só estará disponível após habilitação específica, dentro da janela da conversa recebida e com validação dos dois cadastros. Templates, mídia e campanhas continuam bloqueados para o par. Esta operação não pode ser desfeita pelo painel.
     </div>
     <details className="rounded-lg border border-border px-3 py-2">
       <summary className="cursor-pointer font-medium">Identificadores da prova</summary>
@@ -76,7 +76,7 @@ export function PairCandidateAction({ conversationId, onLinked }: {
       return
     }
     setOpen(false)
-    toast.success('Históricos vinculados para consulta.')
+    toast.success('Históricos vinculados com segurança.')
     onLinked()
   }
 
@@ -103,7 +103,7 @@ export function PairCandidateAction({ conversationId, onLinked }: {
           <Button variant="outline" onClick={() => setOpen(false)} disabled={submitting}>Cancelar</Button>
           <Button onClick={() => void confirm()} disabled={!candidate || !linkEnabled || loading || submitting}>
             {submitting && <Loader2 className="size-4 animate-spin" aria-hidden="true" />}
-            {linkEnabled ? 'Confirmar vínculo somente leitura' : 'Aguardando habilitação segura'}
+            {linkEnabled ? 'Confirmar vínculo auditado' : 'Aguardando habilitação segura'}
           </Button>
         </DialogFooter>
       </DialogContent>
