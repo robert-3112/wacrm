@@ -81,12 +81,12 @@ export async function POST(
   try {
     const { id } = await params
     assertId(id)
-    const requested = readProof(await request.json().catch(() => null))
-    if (!requested || requested.outbound_conversation_id !== id) throw new BadRequestError('Prova inválida.')
     const { userId, supabaseUser } = await requireGestaoSession()
     const limit = checkRateLimit(`whatsapp-pair-link:${userId}`, WHATSAPP_OFICIAL_RATE_LIMITS.inboxWriteAction)
     if (!limit.success) return rateLimitResponse(limit)
     if (!linkEnabled()) return NextResponse.json({ error: 'Vínculo indisponível até habilitação segura de envio para ambos os históricos.' }, { status: 403 })
+    const requested = readProof(await request.json().catch(() => null))
+    if (!requested || requested.outbound_conversation_id !== id) throw new BadRequestError('Prova inválida.')
     const fresh = await preview(supabaseUser, id)
     if (fresh instanceof Response) return fresh
     if (PROOF_KEYS.some(key => fresh[key] !== requested[key])) {
