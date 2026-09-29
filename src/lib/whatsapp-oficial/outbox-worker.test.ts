@@ -456,6 +456,31 @@ describe('processOutboxBatch — verified paired human reply', () => {
     expect(adapterMock.send).not.toHaveBeenCalled()
   })
 
+  it('requeues a claimed reply if the database gate closes after claim', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [pairedJob()] },
+      pairedValidationResults: [{ data: { ok: false, reason: 'pair_reply_disabled' }, error: null }],
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'pair_reply_disabled' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente', claimed_by: null })
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('requires reconciliation instead of sending when a paused reply cannot be requeued', async () => {
+    const job = pairedJob()
+    delete process.env.WHATSAPP_PAIR_REPLY_ENABLED
+    const { admin } = makeAdmin({
+      claimResult: { ok: true, claimed: [job] },
+      failUpdateForIds: new Set([job.outbox_id]),
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+    expect(result.outcomes[0]).toMatchObject({ decision: 'erro_inesperado', reason: 'reconciliacao_necessaria' })
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
   it('revalidates bilaterally twice before a single provider attempt', async () => {
     const job = pairedJob()
     const { admin, rpcCalls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })

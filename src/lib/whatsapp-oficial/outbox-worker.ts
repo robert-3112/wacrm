@@ -413,10 +413,13 @@ async function guardPairedReply(
     await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
     return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' as const }
   }
-  if (process.env.WHATSAPP_PAIR_REPLY_ENABLED !== 'true') {
+  const pause = async (reason: string) => {
     await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
-    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'resposta_par_desabilitada' })
-    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'resposta_par_desabilitada' }, bucket: 'blocked' }
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' as const }
+  }
+  if (process.env.WHATSAPP_PAIR_REPLY_ENABLED !== 'true') {
+    return pause('resposta_par_desabilitada')
   }
   if (job.tipo !== 'mensagem' || job.provider !== 'meta_cloud' || !job.conversation_id || !job.message_id) {
     return block('resposta_par_job_invalido')
@@ -429,7 +432,7 @@ async function guardPairedReply(
       (data.ok === false && (typeof data.reason !== 'string' || !data.reason))) {
     throw new Error('failed_to_revalidate_paired_reply')
   }
-  if (data.ok === false) return block(data.reason)
+  if (data.ok === false) return data.reason === 'pair_reply_disabled' ? pause(data.reason) : block(data.reason)
   return null
 }
 
