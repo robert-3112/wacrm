@@ -16,10 +16,11 @@ const candidate: PairCandidate = {
 }
 
 describe('manager pair evidence preview', () => {
-  it('explains exact Meta match and read-only result before confirmation', () => {
+  it('explains exact Meta match and guarded inbound reply before confirmation', () => {
     const html = renderToStaticMarkup(<PairProofSummary candidate={candidate} />)
     expect(html).toContain('Meta confirmou')
-    expect(html).toContain('Somente leitura')
+    expect(html).toContain('Vínculo auditado')
+    expect(html).toContain('janela da conversa recebida')
     expect(html).toContain('11111111-1111-4111-8111-111111111111')
     expect(html).toContain('22222222-2222-4222-8222-222222222222')
     expect(html).toContain('66666666-6666-4666-8666-666666666666')

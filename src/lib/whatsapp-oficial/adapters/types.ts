@@ -21,6 +21,8 @@ export interface OutboxJob {
   canal_id: string
   conversation_id: string | null
   message_id: string | null
+  /** Non-null only for the SQL-authorized human reply via a verified pair. */
+  paired_reply_pair_id: string | null
   tipo: 'mensagem' | 'template' | 'broadcast'
   payload: Record<string, unknown>
   attempts: number

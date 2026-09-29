@@ -78,6 +78,7 @@ function makeAdmin(
     unconfirmedUpdateForIds?: Set<string>
     beforeMessageUpdate?: () => void
     manualPreflightResults?: Array<{ data: { ok: boolean; reason?: string } | null; error: { message: string } | null }>
+    pairedValidationResults?: Array<{ data: { ok: boolean; reason?: string } | null; error: { message: string } | null }>
   } = {},
 ) {
   const calls: MockCall[] = []
@@ -91,6 +92,9 @@ function makeAdmin(
       rpcCalls.push(args)
       if (name === 'whatsapp_oficial_validar_envio_1a1') {
         return opts.manualPreflightResults?.shift() ?? { data: { ok: true }, error: null }
+      }
+      if (name === 'whatsapp_oficial_validar_resposta_par') {
+        return opts.pairedValidationResults?.shift() ?? { data: { ok: true }, error: null }
       }
       if (name === 'whatsapp_oficial_ator_pode_conversa') {
         return { data: opts.actorAllowedResults?.shift() ?? true, error: null }
@@ -208,6 +212,7 @@ function makeJob(overrides: Partial<OutboxJob> = {}): OutboxJob {
     canal_id: 'canal-1',
     conversation_id: 'conv-1',
     message_id: 'msg-1',
+    paired_reply_pair_id: null,
     tipo: 'mensagem',
     payload: { content: 'oi', message_type: 'text' },
     attempts: 0,
@@ -432,6 +437,73 @@ describe('processOutboxBatch — broker channel ownership at send time', () => {
     const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
 
     expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'corretor_canal_ou_lead_alterado' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+})
+
+describe('processOutboxBatch — verified paired human reply', () => {
+  const pairedJob = () => makeJob({ paired_reply_pair_id: 'pair-1' })
+  beforeEach(() => { process.env.WHATSAPP_PAIR_REPLY_ENABLED = 'true' })
+  afterEach(() => { delete process.env.WHATSAPP_PAIR_REPLY_ENABLED })
+
+  it('keeps a claimed pair reply away from Meta when the operator flag is off', async () => {
+    delete process.env.WHATSAPP_PAIR_REPLY_ENABLED
+    const { admin, calls } = makeAdmin({ claimResult: { ok: true, claimed: [pairedJob()] } })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'resposta_par_desabilitada' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'pendente' })
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('revalidates bilaterally twice before a single provider attempt', async () => {
+    const job = pairedJob()
+    const { admin, rpcCalls } = makeAdmin({ claimResult: { ok: true, claimed: [job] } })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    vi.mocked(adapterMock.send).mockResolvedValue({ providerMessageId: 'wamid.PAIR' })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+    expect(result.sent).toBe(1)
+    expect(rpcCalls.filter(args => args.p_outbox_id === job.outbox_id)).toEqual([
+      { p_outbox_id: job.outbox_id, p_worker_id: 'w1' },
+      { p_outbox_id: job.outbox_id, p_worker_id: 'w1' },
+    ])
+    expect(adapterMock.send).toHaveBeenCalledOnce()
+  })
+
+  it('blocks revoked consent before reading credentials', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [pairedJob()] },
+      pairedValidationResults: [{ data: { ok: false, reason: 'resposta_par_optout' }, error: null }],
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'resposta_par_optout' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(loadChannelCredential).not.toHaveBeenCalled()
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('blocks a window or lead change after credentials and before Graph', async () => {
+    const { admin, calls } = makeAdmin({
+      claimResult: { ok: true, claimed: [pairedJob()] },
+      pairedValidationResults: [
+        { data: { ok: true }, error: null },
+        { data: { ok: false, reason: 'resposta_par_janela_fechada' }, error: null },
+      ],
+    })
+    vi.mocked(loadChannelCredential).mockResolvedValue('secret-token')
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+    expect(result.outcomes[0]).toMatchObject({ decision: 'bloqueado', reason: 'resposta_par_janela_fechada' })
+    expect(outboxUpdates(calls)[0].values).toMatchObject({ status: 'morto' })
+    expect(adapterMock.send).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on an unreadable validator response', async () => {
+    const { admin } = makeAdmin({
+      claimResult: { ok: true, claimed: [pairedJob()] },
+      pairedValidationResults: [{ data: null, error: { message: 'db unavailable' } }],
+    })
+    const result = await processOutboxBatch({ admin, flags: makeFlags({ mode: 'live' }), workerId: 'w1' })
+    expect(result.outcomes[0]).toMatchObject({ decision: 'reenfileirado', reason: 'falha_pre_envio' })
     expect(adapterMock.send).not.toHaveBeenCalled()
   })
 })

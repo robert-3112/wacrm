@@ -398,6 +398,41 @@ async function guardBrokerChannel(
   return block('corretor_canal_ou_lead_alterado')
 }
 
+/** The pair can change after claim or while a credential loads. The database
+ * verifies the current lease, both leads, Meta identity and inbound window. */
+async function guardPairedReply(
+  admin: SupabaseClient,
+  flags: WhatsappFlags,
+  workerId: string,
+  job: OutboxJob,
+  now: Date,
+): Promise<{ outcome: JobOutcome; bucket: Bucket } | null> {
+  if (!job.paired_reply_pair_id) return null
+  const block = async (reason: string) => {
+    await deadLetterBlock(admin, flags, job, workerId, reason, now)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: reason })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason }, bucket: 'blocked' as const }
+  }
+  if (process.env.WHATSAPP_PAIR_REPLY_ENABLED !== 'true') {
+    await requeue(admin, job, workerId, now, CHANNEL_REQUEUE_DELAY_S)
+    await registrarAuditoria(admin, { job, flags, workerId, decisao: 'bloqueado', motivo: 'resposta_par_desabilitada' })
+    return { outcome: { outboxId: job.outbox_id, decision: 'bloqueado', reason: 'resposta_par_desabilitada' }, bucket: 'blocked' }
+  }
+  if (job.tipo !== 'mensagem' || job.provider !== 'meta_cloud' || !job.conversation_id || !job.message_id) {
+    return block('resposta_par_job_invalido')
+  }
+  const { data, error } = await admin.rpc('whatsapp_oficial_validar_resposta_par', {
+    p_outbox_id: job.outbox_id,
+    p_worker_id: workerId,
+  })
+  if (error || !data || typeof data !== 'object' || typeof data.ok !== 'boolean' ||
+      (data.ok === false && (typeof data.reason !== 'string' || !data.reason))) {
+    throw new Error('failed_to_revalidate_paired_reply')
+  }
+  if (data.ok === false) return block(data.reason)
+  return null
+}
+
 type CampaignState = 'active' | 'paused' | 'cancelled' | 'invalid'
 
 /** The recipient relation is authoritative: an outbox payload alone cannot identify its campaign. */
@@ -597,6 +632,9 @@ async function handleJob(
   const brokerBlock = await guardBrokerChannel(admin, flags, workerId, job, now)
   if (brokerBlock) return brokerBlock
 
+  const pairBlock = await guardPairedReply(admin, flags, workerId, job, now)
+  if (pairBlock) return pairBlock
+
   // f) live — the ONLY branch that reads a credential or calls a provider.
   let credential: string
   try {
@@ -636,6 +674,9 @@ async function handleJob(
 
   const finalBrokerBlock = await guardBrokerChannel(admin, flags, workerId, job, clock())
   if (finalBrokerBlock) return finalBrokerBlock
+
+  const finalPairBlock = await guardPairedReply(admin, flags, workerId, job, clock())
+  if (finalPairBlock) return finalPairBlock
 
   let providerMessageId: string
   try {

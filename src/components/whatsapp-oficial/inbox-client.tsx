@@ -285,6 +285,19 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]));
   }, []);
 
+  const handlePairReplyQueued = useCallback(() => {
+    if (!activePair) return;
+    const selectedId = activePair.id;
+    void (async () => {
+      const result = await fetchPairedMessages(createClient(), activePair.pair);
+      if (activeIdRef.current === selectedId) {
+        setMessages(result.data);
+        setMessagesError(result.error);
+      }
+      await reloadInbox();
+    })();
+  }, [activePair, reloadInbox]);
+
   const handleConversationChanged = useCallback(() => {
     if (activeIdRef.current) void hydrateConversation(activeIdRef.current);
   }, [hydrateConversation]);
@@ -344,6 +357,7 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
             messagesError={messagesError}
             loading={messagesLoading}
             onMessageSent={handleMessageSent}
+            onPairReplyQueued={handlePairReplyQueued}
             onConversationChanged={handleConversationChanged}
             onBack={handleBack}
           />
