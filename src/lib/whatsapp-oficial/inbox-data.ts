@@ -241,9 +241,57 @@ export async function fetchConversations(
 export async function fetchConversationPairs(
   supabase: SupabaseClient,
 ): Promise<{ data: WhatsAppConversationPair[]; error: string | null }> {
-  const { data, error } = await supabase.from('whatsapp_conversation_pairs').select(PAIR_SELECT)
-  if (error) return { data: [], error: error.message }
-  return { data: (data ?? []) as WhatsAppConversationPair[], error: null }
+  const pairs: WhatsAppConversationPair[] = []
+  const pageSize = 500
+  for (let start = 0; ; start += pageSize) {
+    const { data, error } = await supabase.from('whatsapp_conversation_pairs')
+      .select(PAIR_SELECT).order('id').range(start, start + pageSize - 1)
+    if (error) return { data: [], error: error.message }
+    const page = (data ?? []) as WhatsAppConversationPair[]
+    pairs.push(...page)
+    if (page.length < pageSize) return { data: pairs, error: null }
+  }
+}
+
+/** Load one safe Inbox snapshot. An unknown link state must never expose a
+ * potentially paired member as an actionable standalone conversation. */
+export async function fetchInboxSnapshot(
+  supabase: SupabaseClient,
+): Promise<{ data: { conversations: WhatsAppConversation[]; pairs: WhatsAppConversationPair[] } | null; error: string | null }> {
+  const conversationsResult = await fetchConversations(supabase)
+  if (conversationsResult.error) return { data: null, error: conversationsResult.error }
+  const pairsResult = await fetchConversationPairs(supabase)
+  if (pairsResult.error) return { data: null, error: pairsResult.error }
+
+  const conversations = [...conversationsResult.data]
+  const byId = new Map(conversations.map(conversation => [conversation.id, conversation]))
+  // Only links touching the 300-row inbox can produce an actionable row.
+  const relevantPairs = pairsResult.data.filter(pair =>
+    byId.has(pair.outbound_conversation_id) || byId.has(pair.inbound_conversation_id))
+  const missingIds = [...new Set(relevantPairs.flatMap(pair => [pair.outbound_conversation_id, pair.inbound_conversation_id]))]
+    .filter(id => !byId.has(id))
+  const missing = await Promise.all(missingIds.map(id => fetchConversationById(supabase, id)))
+  if (missing.some(conversation => !conversation)) return { data: null, error: 'Membro de vínculo indisponível para esta sessão.' }
+  for (const conversation of missing) {
+    if (conversation) {
+      conversations.push(conversation)
+      byId.set(conversation.id, conversation)
+    }
+  }
+  const seen = new Set<string>()
+  for (const pair of relevantPairs) {
+    const outbound = byId.get(pair.outbound_conversation_id)
+    const inbound = byId.get(pair.inbound_conversation_id)
+    if (!outbound || !inbound || outbound.id === inbound.id ||
+      seen.has(outbound.id) || seen.has(inbound.id) ||
+      pair.tenant_id !== outbound.tenant_id || pair.tenant_id !== inbound.tenant_id ||
+      outbound.canal_id !== inbound.canal_id) {
+      return { data: null, error: 'Vínculo inconsistente para esta sessão.' }
+    }
+    seen.add(outbound.id)
+    seen.add(inbound.id)
+  }
+  return { data: { conversations, pairs: relevantPairs }, error: null }
 }
 
 /** Re-fetch a single conversation WITH its lead/corretor join. Used by the

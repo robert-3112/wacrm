@@ -24,8 +24,7 @@ import { createClient } from "@/lib/supabase/client";
 import {
   buildInboxItems,
   fetchConversationById,
-  fetchConversationPairs,
-  fetchConversations,
+  fetchInboxSnapshot,
   fetchMessages,
   fetchPairedMessages,
   mergePairedMessages,
@@ -43,9 +42,9 @@ import type { WhatsAppConversation, WhatsAppConversationPair, WhatsAppMessage } 
 
 export function InboxClient({ envioReal }: { envioReal: boolean }) {
   const [conversations, setConversations] = useState<WhatsAppConversation[]>([]);
-  const conversationsRef = useRef<WhatsAppConversation[]>([]);
   const [pairs, setPairs] = useState<WhatsAppConversationPair[]>([]);
-  const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [inboxStatus, setInboxStatus] = useState<"loading" | "ready" | "error">("loading");
+  const reloadInFlight = useRef(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
   const [messagesError, setMessagesError] = useState<string | null>(null);
@@ -105,26 +104,35 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
       : activeItem ? [activeItem.conversation.id] : [];
   }, [activeId, activeItem]);
 
-  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
-
   // A newly verified link replaces its two individual rows without losing selection.
   useEffect(() => {
     if (!activeId || activeItem) return;
     const replacement = items.find((item) => item.kind === "pair" &&
       (item.outbound.id === activeId || item.inbound.id === activeId));
     if (replacement) setActiveId(replacement.id);
-    else if (!conversationsLoading) setActiveId(null);
-  }, [activeId, activeItem, items, conversationsLoading]);
+    else if (inboxStatus === "ready") setActiveId(null);
+  }, [activeId, activeItem, items, inboxStatus]);
 
-  const loadVerifiedPairs = useCallback(async (supabase: ReturnType<typeof createClient>, visibleConversations: WhatsAppConversation[]) => {
-    const result = await fetchConversationPairs(supabase);
-    if (result.error) return result;
-    const eligible = buildInboxItems(visibleConversations, result.data)
-      .filter((item): item is Extract<InboxItem, { kind: "pair" }> => item.kind === "pair");
-    const checked = await Promise.all(eligible.map(async item => ({
-      pair: item.pair, history: await fetchPairedMessages(supabase, item.pair),
-    })));
-    return { data: checked.filter(item => !item.history.error).map(item => item.pair), error: null };
+  const reloadInbox = useCallback(async (showLoading = false) => {
+    if (reloadInFlight.current) return;
+    reloadInFlight.current = true;
+    if (showLoading) setInboxStatus("loading");
+    try {
+      const result = await fetchInboxSnapshot(createClient());
+      if (!result.data) {
+        // Keep the previous rows in memory, but hide every action until a
+        // complete authenticated snapshot proves the link state again.
+        setInboxStatus("error");
+        return;
+      }
+      setConversations(result.data.conversations);
+      setPairs(result.data.pairs);
+      setInboxStatus("ready");
+    } catch {
+      setInboxStatus("error");
+    } finally {
+      reloadInFlight.current = false;
+    }
   }, []);
 
   // Current user id — used by the notes panel to label the caller's own
@@ -143,35 +151,18 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     };
   }, []);
 
-  // Initial conversation list load.
+  // A complete pair index is required before any standalone actions appear.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const supabase = createClient();
-      const { data, error } = await fetchConversations(supabase);
-      if (cancelled) return;
-      if (error) toast.error("Não foi possível carregar as conversas.");
-      setConversations(data);
-      conversationsRef.current = data;
-      setConversationsLoading(false);
-      const pairResult = await loadVerifiedPairs(supabase, data);
-      if (cancelled) return;
-      if (pairResult.error) toast.error("Não foi possível carregar as conversas vinculadas.");
-      setPairs(pairResult.data);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [loadVerifiedPairs]);
+    void reloadInbox();
+  }, [reloadInbox]);
 
   // Links are created by the verified webhook, not by a conversation mutation.
   useEffect(() => {
     const timer = window.setInterval(async () => {
-      const result = await loadVerifiedPairs(createClient(), conversationsRef.current);
-      if (!result.error) setPairs(result.data);
+      void reloadInbox();
     }, 30_000);
     return () => window.clearInterval(timer);
-  }, [loadVerifiedPairs]);
+  }, [reloadInbox]);
 
   // Messages fetch whenever the selected conversation changes.
   useEffect(() => {
@@ -205,7 +196,7 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
   // the server-side effect of the route it calls) so the count doesn't
   // flicker while the request is in flight.
   useEffect(() => {
-    if (!activeConversation || activeConversation.nao_lidas_corretor <= 0) return;
+    if (inboxStatus !== "ready" || !activeConversation || activeConversation.nao_lidas_corretor <= 0) return;
     const id = activeConversation.id;
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, nao_lidas_corretor: 0 } : c)),
@@ -216,7 +207,7 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     // UPDATE) — activeConversation.nao_lidas_corretor is intentionally
     // excluded so this doesn't loop against the optimistic zero above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeConversation?.id]);
+  }, [activeConversation?.id, inboxStatus]);
 
   // Re-fetch a single conversation (with its `lead`/`corretor` join) and
   // merge it into state. Realtime `postgres_changes` payloads only carry
@@ -291,7 +282,17 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
     if (activeIdRef.current) void hydrateConversation(activeIdRef.current);
   }, [hydrateConversation]);
 
-  const hasActiveConversation = Boolean(activeId);
+  const hasActiveConversation = Boolean(activeItem);
+
+  if (inboxStatus !== "ready") {
+    return <div className="flex h-full items-center justify-center bg-background px-6 text-center">
+      {inboxStatus === "loading" ? <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />Verificando conversas e vínculos…</div>
+        : <div role="alert" className="max-w-sm space-y-3">
+          <p className="text-sm font-medium">Não foi possível confirmar os vínculos das conversas. Atendimento pausado nesta tela.</p>
+          <Button variant="outline" onClick={() => void reloadInbox(true)}>Tentar novamente</Button>
+        </div>}
+    </div>;
+  }
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -303,7 +304,7 @@ export function InboxClient({ envioReal }: { envioReal: boolean }) {
       >
         <ConversationList
           conversations={items}
-          loading={conversationsLoading}
+          loading={false}
           activeConversationId={activeId}
           channelNames={channelNames}
           onSelect={handleSelectConversation}

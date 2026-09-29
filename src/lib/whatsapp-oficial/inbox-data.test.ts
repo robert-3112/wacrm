@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   buildInboxItems,
   fetchPairedMessages,
+  fetchInboxSnapshot,
+  fetchConversationPairs,
   mergePairedMessages,
   leadDisplayName,
   matchesInboxFilter,
@@ -260,5 +262,48 @@ describe('paired inbox view', () => {
     const result = await fetchPairedMessages(supabase as never, pair)
     expect(result.data).toEqual([])
     expect(result.error).toMatch(/indisponível/)
+    // History errors affect the read-only timeline, never the link index.
+    expect(buildInboxItems([makeConversation({ id: 'out' }), makeConversation({ id: 'in' })], [pair])[0].kind).toBe('pair')
+  })
+})
+
+function snapshotClient(rows: WhatsAppConversation[], pairRows: WhatsAppConversationPair[] | null, lookup: Record<string, WhatsAppConversation | null> = {}) {
+  return { from: (table: string) => ({ select: () => {
+    if (table === 'whatsapp_conversation_pairs') return { order: () => ({ range: async (start: number, end: number) => ({
+      data: pairRows?.slice(start, end + 1) ?? null, error: pairRows === null ? { message: 'pair query failed' } : null,
+    }) }) }
+    if (table !== 'whatsapp_conversations') throw new Error('Unexpected table')
+    return {
+      order: () => ({ order: () => ({ limit: async () => ({ data: rows, error: null }) }) }),
+      eq: (_column: string, id: string) => ({ maybeSingle: async () => ({ data: lookup[id] ?? null, error: null }) }),
+    }
+  } }) }
+}
+
+describe('safe paired inbox snapshot', () => {
+  it('reads every page of RLS-visible links without silently treating later pairs as singles', async () => {
+    const rows = Array.from({ length: 501 }, (_, index) => ({ ...pair, id: `pair-${index}` }))
+    const result = await fetchConversationPairs(snapshotClient([], rows) as never)
+    expect(result.error).toBeNull()
+    expect(result.data).toHaveLength(501)
+  })
+  it('fails closed when the pair index cannot be read', async () => {
+    const result = await fetchInboxSnapshot(snapshotClient([makeConversation()], null) as never)
+    expect(result.data).toBeNull()
+    expect(result.error).toBe('pair query failed')
+  })
+
+  it('loads a missing second member beyond the 300-row list limit', async () => {
+    const rows = Array.from({ length: 300 }, (_, index) => makeConversation({ id: index === 0 ? 'out' : `c${index}` }, null))
+    const result = await fetchInboxSnapshot(snapshotClient(rows, [pair], { in: makeConversation({ id: 'in' }, null) }) as never)
+    expect(result.error).toBeNull()
+    expect(result.data?.conversations).toHaveLength(301)
+    expect(buildInboxItems(result.data!.conversations, result.data!.pairs).filter(item => item.kind === 'pair')).toHaveLength(1)
+  })
+
+  it('fails closed if the missing member cannot be resolved under RLS', async () => {
+    const result = await fetchInboxSnapshot(snapshotClient([makeConversation({ id: 'out' }, null)], [pair]) as never)
+    expect(result.data).toBeNull()
+    expect(result.error).toMatch(/Membro de vínculo indisponível/)
   })
 })
