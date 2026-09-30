@@ -24,6 +24,7 @@ import { NextResponse } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from './supabase-admin'
+import { errorDiagnostics } from './error-diagnostics'
 
 export class UnauthorizedError extends Error {
   readonly status = 401 as const
@@ -71,7 +72,7 @@ export function toErrorResponse(err: unknown): NextResponse {
   if (isPostgrestPermissionError(err)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
-  console.error('[whatsapp-oficial/api-auth] uncategorized error:', err)
+  console.error('[whatsapp-oficial/api-auth] uncategorized error:', errorDiagnostics(err))
   return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
 }
 

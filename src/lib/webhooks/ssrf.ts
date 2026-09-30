@@ -23,7 +23,9 @@ import { isIP } from 'node:net';
 
 /** True for loopback / private / link-local / reserved IPv4 or IPv6. */
 export function isPrivateOrReservedIp(ip: string): boolean {
-  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  const address = ip.replace(/^\[|\]$/g, '');
+  if (!isIP(address) || address.includes('%')) return true;
+  const v4 = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
     const a = Number(v4[1]);
     const b = Number(v4[2]);
@@ -37,13 +39,18 @@ export function isPrivateOrReservedIp(ip: string): boolean {
     return false;
   }
 
-  const v6 = ip.toLowerCase().replace(/^\[|\]$/g, '');
+  // WHATWG URL canonicalizes expanded/uppercase IPv6 and dotted mapped tails.
+  const v6 = new URL(`http://[${address}]/`).hostname.slice(1, -1);
   if (v6 === '::1' || v6 === '::') return true; // loopback / unspecified
-  if (v6.startsWith('fe8') || v6.startsWith('fe9') || v6.startsWith('fea') || v6.startsWith('feb'))
+  if (/^fe[89ab][\da-f]:/.test(v6))
     return true; // fe80::/10 link-local
-  if (v6.startsWith('fc') || v6.startsWith('fd')) return true; // fc00::/7 ULA
-  const mapped = v6.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped) return isPrivateOrReservedIp(mapped[1]); // IPv4-mapped
+  if (/^f[cd][\da-f]{2}:/.test(v6)) return true; // fc00::/7 ULA
+  const mapped = v6.match(/^::ffff:([\da-f]{1,4}):([\da-f]{1,4})$/);
+  if (mapped) {
+    const high = parseInt(mapped[1], 16);
+    const low = parseInt(mapped[2], 16);
+    return isPrivateOrReservedIp(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+  }
   return false;
 }
 
