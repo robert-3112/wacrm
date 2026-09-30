@@ -13,7 +13,7 @@ vi.mock('./supabase-admin', () => ({
   supabaseAdmin: mocks.supabaseAdmin,
 }))
 
-import { NotFoundError, UnauthorizedError, requireConversationAccess } from './api-auth'
+import { NotFoundError, UnauthorizedError, requireConversationAccess, toErrorResponse } from './api-auth'
 
 /**
  * Minimal fake of the Supabase query-builder surface `requireConversationAccess`
@@ -189,5 +189,21 @@ describe('requireConversationAccess', () => {
     }))
     await expect(requireConversationAccess('conv-1')).rejects.toBeInstanceOf(NotFoundError)
     expect(mocks.supabaseAdmin).not.toHaveBeenCalled()
+  })
+})
+
+describe('toErrorResponse diagnostics', () => {
+  it('keeps the database code but never logs raw RPC messages, details, hints or payloads', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const response = toErrorResponse({
+        code: '23505', message: 'duplicate key (private-contact) already exists',
+        details: 'claim_token=synthetic-secret', hint: 'Authorization: synthetic-secret',
+      })
+      expect(response.status).toBe(500)
+      expect(await response.json()).toEqual({ error: 'Internal server error' })
+      expect(log).toHaveBeenCalledWith('[whatsapp-oficial/api-auth] uncategorized error:',
+        { type: 'object', code: '23505' })
+    } finally { log.mockRestore() }
   })
 })

@@ -33,6 +33,7 @@ import { NextResponse } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { supabaseAdmin } from './supabase-admin'
 import { checkRateLimit } from '@/lib/rate-limit'
+import { errorDiagnostics } from './error-diagnostics'
 
 /** Escopos que o CHECK de `whatsapp_api_keys.escopos` aceita. Espelha o banco. */
 export const API_V1_SCOPES = [
@@ -172,7 +173,7 @@ export function toApiV1Response(err: unknown): NextResponse {
     if (err.message && err.message !== err.slug) body.message = err.message
     return NextResponse.json(body, { status: err.status, headers: err.headers })
   }
-  console.error('[api/v1] erro nao categorizado:', err)
+  console.error('[api/v1] erro nao categorizado:', errorDiagnostics(err))
   return NextResponse.json(
     { error: 'internal', message: 'Internal server error' },
     { status: 500 },

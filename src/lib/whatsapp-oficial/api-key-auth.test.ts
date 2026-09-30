@@ -381,9 +381,16 @@ describe('envelope', () => {
   })
 
   it('erro nao categorizado vira 500 generico sem texto interno', async () => {
-    const res = toApiV1Response(new Error('senha do banco no stack trace'))
-    expect(res.status).toBe(500)
-    expect(await corpo(res)).toEqual({ error: 'internal', message: 'Internal server error' })
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = toApiV1Response(Object.assign(new Error('senha do banco no stack trace'), {
+        code: 'PGRST202', details: 'claim_token=synthetic-secret',
+      }))
+      expect(res.status).toBe(500)
+      expect(await corpo(res)).toEqual({ error: 'internal', message: 'Internal server error' })
+      expect(log).toHaveBeenCalledWith('[api/v1] erro nao categorizado:',
+        { type: 'Error', code: 'PGRST202' })
+    } finally { log.mockRestore() }
   })
 
   it('slug sem mensagem propria nao repete o slug em message', async () => {
