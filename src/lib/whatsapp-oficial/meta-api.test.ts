@@ -19,6 +19,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -246,26 +247,105 @@ describe('sendTemplateMessage', () => {
 
 describe('getMediaUrl / downloadMedia', () => {
   it('resolves the CDN url + mime type', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ url: 'https://cdn.example/media.jpg', mime_type: 'image/jpeg' }),
     )
     const result = await getMediaUrl({ mediaId: 'MID', accessToken: 'tok' })
     expect(result).toEqual({ url: 'https://cdn.example/media.jpg', mimeType: 'image/jpeg' })
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000)
+    expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
   })
 
   it('downloads bytes with the same bearer token', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'image/jpeg' }),
-      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
-    } as unknown as Response)
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+      headers: { 'content-type': 'image/jpeg' },
+    }))
 
     const result = await downloadMedia({ downloadUrl: 'https://cdn.example/media.jpg', accessToken: 'tok' })
     expect(result.contentType).toBe('image/jpeg')
     expect(Array.from(result.buffer)).toEqual([1, 2, 3])
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok')
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  const downloadArgs = { downloadUrl: 'https://cdn.example/media', accessToken: 'tok' }
+  const maxBytes = 100 * 1024 * 1024
+
+  it('rejects an oversized declared body without reading it', async () => {
+    const cancel = vi.fn()
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ cancel }), {
+      headers: { 'content-length': String(maxBytes + 1) },
+    }))
+    await expect(downloadMedia(downloadArgs)).rejects.toThrow('media_download_too_large')
+    expect(cancel).toHaveBeenCalled()
+  })
+
+  it.each([undefined, '1', 'invalid'])('counts streamed bytes despite content-length %s', async (declared) => {
+    const cancel = vi.fn()
+    const chunk = new Uint8Array(1024 * 1024)
+    let count = 0
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({
+      pull(controller) {
+        if (count++ < 102) controller.enqueue(chunk)
+        else controller.close()
+      }, cancel,
+    }), { headers: declared ? { 'content-length': declared } : {} }))
+    await expect(downloadMedia(downloadArgs)).rejects.toThrow('media_download_too_large')
+    expect(cancel).toHaveBeenCalled()
+  })
+
+  it('rejects a missing media body', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null))
+    await expect(downloadMedia(downloadArgs)).rejects.toThrow('media_download_missing_body')
+  })
+
+  it('accepts a document at the inbound 100 MB ceiling, beyond the outbound upload cap', async () => {
+    let count = 0
+    const chunk = new Uint8Array(1024 * 1024)
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({
+      pull(controller) {
+        if (count++ < 100) controller.enqueue(chunk)
+        else controller.close()
+      },
+    }), { headers: { 'content-type': 'application/pdf' } }))
+    const result = await downloadMedia(downloadArgs)
+    expect(result.buffer.byteLength).toBe(maxBytes)
+    expect(result.contentType).toBe('application/pdf')
+  })
+
+  it('releases and cancels the reader when the stream fails', async () => {
+    const failure = new Error('connection reset')
+    const reader = { read: vi.fn().mockRejectedValue(failure), cancel: vi.fn().mockResolvedValue(undefined),
+      releaseLock: vi.fn() }
+    fetchMock.mockResolvedValueOnce({ ok: true, headers: new Headers(),
+      body: { getReader: () => reader } })
+    await expect(downloadMedia(downloadArgs)).rejects.toBe(failure)
+    expect(reader.cancel).toHaveBeenCalled()
+    expect(reader.releaseLock).toHaveBeenCalled()
+  })
+
+  it.each(['headers', 'body'])('enforces the deadline while waiting for %s', async (phase) => {
+    vi.useFakeTimers()
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), ms)
+      return controller.signal
+    })
+    fetchMock.mockImplementation((_url, { signal }: RequestInit) => {
+      if (phase === 'headers') return new Promise((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(signal!.reason), { once: true })
+      })
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          signal!.addEventListener('abort', () => controller.error(signal!.reason), { once: true })
+        },
+      })))
+    })
+    const rejection = expect(downloadMedia(downloadArgs)).rejects.toMatchObject({ name: 'TimeoutError' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    await rejection
   })
 
   it('throws MetaApiError (not a bare Error) on a failed download', async () => {

@@ -27,6 +27,9 @@ const META_API_VERSION =
   configuredVersion && /^v\d+\.\d+$/.test(configuredVersion) ? configuredVersion : 'v24.0'
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
 const SEND_TIMEOUT_MS = 15_000
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 60_000
+// Inbound documents allow 100 MB; the 16 MB outbound-upload cap is not a relay cap.
+const MEDIA_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
 
 /**
  * Base da Graph API resolvida (versão configurável por `META_GRAPH_API_VERSION`).
@@ -311,6 +314,7 @@ export async function getMediaUrl(args: GetMediaUrlArgs): Promise<{ url: string;
   const { mediaId, accessToken } = args
   const response = await fetch(`${META_API_BASE}/${mediaId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   })
   if (!response.ok) await throwMetaError(response, `Media fetch failed: ${response.status}`)
   const data = await response.json()
@@ -328,11 +332,33 @@ export async function downloadMedia(
   args: DownloadMediaArgs,
 ): Promise<{ buffer: Buffer; contentType: string }> {
   const { downloadUrl, accessToken } = args
-  const response = await fetch(downloadUrl, { headers: { Authorization: `Bearer ${accessToken}` } })
+  const response = await fetch(downloadUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(MEDIA_DOWNLOAD_TIMEOUT_MS),
+  })
   if (!response.ok) {
     throw new MetaApiError(`Media download failed: ${response.status}`, { httpStatus: response.status })
   }
   const contentType = response.headers.get('content-type') || 'application/octet-stream'
-  const buffer = Buffer.from(await response.arrayBuffer())
-  return { buffer, contentType }
+  if (Number(response.headers.get('content-length')) > MEDIA_DOWNLOAD_MAX_BYTES) {
+    void response.body?.cancel().catch(() => {})
+    throw new Error('media_download_too_large')
+  }
+  if (!response.body) throw new Error('media_download_missing_body')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > MEDIA_DOWNLOAD_MAX_BYTES) throw new Error('media_download_too_large')
+      if (value.byteLength) chunks.push(value)
+    }
+    return { buffer: Buffer.concat(chunks, size), contentType }
+  } finally {
+    void reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
 }
